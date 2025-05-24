@@ -16,8 +16,8 @@ class ZedImagePublisher(Node):
         self.depth_publisher = self.create_publisher(Image, 'zed_image/depth', 10)
 
         self.bridge = CvBridge()
-        # Timer for grabbing and publishing images (4 Hz)
-        self.timer = self.create_timer(0.25, self.timer_callback)
+        # Timer for grabbing and publishing images
+        self.timer = self.create_timer(0.05, self.timer_callback)
 
         # ==========================================================
         # (A) Initialize the ZED camera with provided settings
@@ -40,33 +40,33 @@ class ZedImagePublisher(Node):
 
         self.get_logger().info("ZED camera initialized.")
 
-        # ==========================================================
-        # (B) Retrieve and log camera calibration information
-        # ==========================================================
-        camera_information = self.zed_cam.get_camera_information()
-        calibration_params = camera_information.camera_configuration.calibration_parameters
+        # # ==========================================================
+        # # (B) Retrieve and log camera calibration information
+        # # ==========================================================
+        # camera_information = self.zed_cam.get_camera_information()
+        # calibration_params = camera_information.camera_configuration.calibration_parameters
 
-        # Access intrinsic parameters for the left camera
-        left_cam_intrinsics = calibration_params.left_cam
-        focal_left_x = left_cam_intrinsics.fx
-        focal_left_y = left_cam_intrinsics.fy
-        principal_point_left_x = left_cam_intrinsics.cx
-        principal_point_left_y = left_cam_intrinsics.cy
-        distortion_coeffs_left = left_cam_intrinsics.disto # Radial and tangential distortion coefficients
+        # # Access intrinsic parameters for the left camera
+        # left_cam_intrinsics = calibration_params.left_cam
+        # focal_left_x = left_cam_intrinsics.fx
+        # focal_left_y = left_cam_intrinsics.fy
+        # principal_point_left_x = left_cam_intrinsics.cx
+        # principal_point_left_y = left_cam_intrinsics.cy
+        # distortion_coeffs_left = left_cam_intrinsics.disto # Radial and tangential distortion coefficients
 
-        # Access stereo parameters
-        baseline_translation_x = calibration_params.stereo_transform.get_translation().get()[0] # Translation between left and right eye on x-axis (baseline)
-        # Note: ZED SDK provides baseline directly as tx
+        # # Access stereo parameters
+        # baseline_translation_x = calibration_params.stereo_transform.get_translation().get()[0] # Translation between left and right eye on x-axis (baseline)
+        # # Note: ZED SDK provides baseline directly as tx
 
-        # Log the calibration information
-        self.get_logger().info("--- Camera Calibration Parameters (Left Camera) ---")
-        self.get_logger().info(f"Focal Length (fx): {focal_left_x}")
-        self.get_logger().info(f"Focal Length (fy): {focal_left_y}")
-        self.get_logger().info(f"Principal Point (cx): {principal_point_left_x}")
-        self.get_logger().info(f"Principal Point (cy): {principal_point_left_y}")
-        self.get_logger().info(f"Distortion Coefficients (k1, k2, p1, p2, k3): {distortion_coeffs_left}")
-        self.get_logger().info(f"Stereo Baseline (tx): {baseline_translation_x} meters")
-        self.get_logger().info("-------------------------------------------------")
+        # # Log the calibration information
+        # self.get_logger().info("--- Camera Calibration Parameters (Left Camera) ---")
+        # self.get_logger().info(f"Focal Length (fx): {focal_left_x}")
+        # self.get_logger().info(f"Focal Length (fy): {focal_left_y}")
+        # self.get_logger().info(f"Principal Point (cx): {principal_point_left_x}")
+        # self.get_logger().info(f"Principal Point (cy): {principal_point_left_y}")
+        # self.get_logger().info(f"Distortion Coefficients (k1, k2, p1, p2, k3): {distortion_coeffs_left}")
+        # self.get_logger().info(f"Stereo Baseline (tx): {baseline_translation_x} meters")
+        # self.get_logger().info("-------------------------------------------------")
 
 
         self.zed_left_image = sl.Mat()

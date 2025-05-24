@@ -116,7 +116,7 @@ class PolicyNode3D(Node):
         self.get_logger().info("2D Diffusion Policy Node for Baseline Gripper Initialized!")
 
     # Create helper method to save images
-    def save_data(self, zed_rgb_msg, rs_msg=None, debug_dir=Path("debug")):
+    def save_data(self, zed_rgb_msg, rs_msg=None, debug_dir=Path("2d_dp_debug")):
         """Save RGB and depth images for debugging"""
         debug_dir.mkdir(parents=True, exist_ok=True)
 
@@ -197,32 +197,32 @@ class PolicyNode3D(Node):
             return  # not enough data yet
 
         # Robot Pose
-        pose_slice  = self.pose_buffer[-self.observation_horizon:]
-        pose_np     = np.stack([p[0] for p in pose_slice])           # (T, 10)
-        pose_tstamps= np.array([p[1] for p in pose_slice])           # (T,)
+        pose_slice = self.pose_buffer[-self.observation_horizon:]
+        pose_np = np.stack([p[0] for p in pose_slice])           # (T, 10)
+        pose_tstamps = np.array([p[1] for p in pose_slice])           # (T,)
         pose_tensor = torch.from_numpy(pose_np).unsqueeze(0)         # (1, T, 10)
 
         # Zed RGB
-        zed_rgb_slice   = self.zed_rgb_buffer[-self.observation_horizon:]
-        zed_rgb_np      = np.stack([r[0] for r in zed_rgb_slice])            # (T, 3, H, W)
+        zed_rgb_slice = self.zed_rgb_buffer[-self.observation_horizon:]
+        zed_rgb_np = np.stack([r[0] for r in zed_rgb_slice])            # (T, 3, H, W)
         zed_rgb_tstamps = np.array([r[1] for r in zed_rgb_slice])            # (T,)
-        zed_rgb_tensor  = torch.from_numpy(zed_rgb_np).unsqueeze(0)          # (1, T, 3, H, W)
+        zed_rgb_tensor = torch.from_numpy(zed_rgb_np).unsqueeze(0)          # (1, T, 3, H, W)
 
         # RealSense RGB
-        rs_slice    = self.rs_color_buffer[-self.observation_horizon:]
-        rs_np       = np.stack([r[0] for r in rs_slice])             # (T, 3, H, W)
-        rs_rgb_tstamps  = np.array([r[1] for r in rs_slice])             # (T,)
-        rs_rgb_tensor   = torch.from_numpy(rs_np).unsqueeze(0)           # (1, T, 3, H, W)
+        rs_slice = self.rs_color_buffer[-self.observation_horizon:]
+        rs_np = np.stack([r[0] for r in rs_slice])             # (T, 3, H, W)
+        rs_rgb_tstamps = np.array([r[1] for r in rs_slice])             # (T,)
+        rs_rgb_tensor = torch.from_numpy(rs_np).unsqueeze(0)           # (1, T, 3, H, W)
 
         # self.save_data(zed_rgb_slice[0][0], rs_slice[0][0])
 
         obs_dict = {
-            'pose':              pose_tensor,
-            'zed_color_images':  zed_rgb_tensor,
-            'rs_color_images':   rs_rgb_tensor,
-            'pose_timestamps':   pose_tstamps,
-            'zed_rgb_timestamps':    zed_rgb_tstamps,
-            'rs_rgb_timestamps':     rs_rgb_tstamps
+            'pose': pose_tensor,
+            'zed_color_images': zed_rgb_tensor,
+            'rs_color_images': rs_rgb_tensor,
+            'pose_timestamps': pose_tstamps,
+            'zed_rgb_timestamps': zed_rgb_tstamps,
+            'rs_rgb_timestamps': rs_rgb_tstamps
         }
 
         # Push to shared memory (IPC)
@@ -230,40 +230,45 @@ class PolicyNode3D(Node):
 
 
     def timer_callback(self):
-        """
-        Publish exactly ONE action per dt and keep the pending-action counter in sync.
-        """
         # Pull freshly queued actions into the local list
         while not self.action_queue.empty():
             self.pending_actions.append(self.action_queue.get())
 
         if not self.pending_actions:
-            return                         
+            self.shared_obs["exec_done"] = True
+            return
+        else:
+            self.shared_obs["exec_done"] = False
 
         # Publish the oldest action
-        action = self.pending_actions.pop(0)
+        while self.pending_actions:
+            action = self.pending_actions.pop(0)
 
-        # Create pose and gripper messages
-        ee_pos, ee_rot6d, grip = action[:3], action[3:9], action[9]
-        ee_quat = self.tf.forward(torch.tensor(ee_rot6d))
+            # Create pose and gripper messages
+            ee_pos, ee_rot6d, grip = action[:3], action[3:9], action[9]
+            ee_quat = self.tf.forward(torch.tensor(ee_rot6d))
 
-        ee_msg = PoseStamped()
-        ee_msg.header.stamp = self.get_clock().now().to_msg()
-        ee_msg.pose.position.x = float(ee_pos[0])
-        ee_msg.pose.position.y = float(ee_pos[1])
-        ee_msg.pose.position.z = float(ee_pos[2])
-        ee_msg.pose.orientation.x = float(ee_quat[1])
-        ee_msg.pose.orientation.y = float(ee_quat[2])
-        ee_msg.pose.orientation.z = float(ee_quat[3])
-        ee_msg.pose.orientation.w = float(ee_quat[0])
+            ee_msg = PoseStamped()
+            ee_msg.header.stamp = self.get_clock().now().to_msg()
+            ee_msg.pose.position.x = float(ee_pos[0])
+            ee_msg.pose.position.y = float(ee_pos[1])
+            ee_msg.pose.position.z = float(ee_pos[2])
+            ee_msg.pose.orientation.x = float(ee_quat[1])
+            ee_msg.pose.orientation.y = float(ee_quat[2])
+            ee_msg.pose.orientation.z = float(ee_quat[3])
+            ee_msg.pose.orientation.w = float(ee_quat[0])
 
-        grip_msg = Float32()
-        grip_msg.data = float(grip)
+            grip_msg = Float32()
+            grip_msg.data = float(grip)
 
-        if not self.paused:
-            self.get_logger().info(f"Publishing action: Position = {ee_pos.round(4)} | Gripper = {grip:.4f} | Timestamp = {time.monotonic() - self.start_time}")
-            self.pub_robot_pose.publish(ee_msg)
-            self.gripper_pub.publish(grip_msg)
+            if not self.paused:
+                self.get_logger().info(f"Publishing action: Position = {ee_pos.round(4)} | Gripper = {grip:.4f} | Timestamp = {time.monotonic() - self.start_time}")
+                self.pub_robot_pose.publish(ee_msg)
+                self.gripper_pub.publish(grip_msg)
+
+            time.sleep(0.1)
+        
+        self.shared_obs["exec_done"] = True
 
 
     def synced_obs_callback(self, pose_msg, zed_rgb_msg, gripper_msg, rs_msg):
@@ -327,6 +332,7 @@ class PolicyNode3D(Node):
         according to `shape_meta`.
         """
         C, H, W = self.shape_meta['obs'][cam_key]['shape']
+        # self.get_logger().info(f"Resizing {cam_key} to {H}x{W}")
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)          # BGR ➜ RGB
         img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
         img = img.astype(np.float32) / 255.0
@@ -362,14 +368,14 @@ def inference_loop(model_path, shared_obs, action_queue, action_horizon = 4, dev
             zed_new = np.min(obs_now["zed_rgb_timestamps"]) > prev_zed_latest
             rs_new = np.min(obs_now["rs_rgb_timestamps"]) > prev_rs_latest
 
-            if pose_new and zed_new and rs_new:
+            if pose_new and zed_new and rs_new and shared_obs['exec_done']:
                 break
             time.sleep(0.001)
 
         # Save newest observation timestamps
         prev_pose_latest = obs_now["pose_timestamps"][-1]
-        prev_zed_latest  = obs_now["zed_rgb_timestamps"][-1]
-        prev_rs_latest   = obs_now["rs_rgb_timestamps"][-1]
+        prev_zed_latest = obs_now["zed_rgb_timestamps"][-1]
+        prev_rs_latest = obs_now["rs_rgb_timestamps"][-1]
 
         # Grab new observations
         obs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in obs_now.items()} 
@@ -415,7 +421,7 @@ def load_diffusion_policy(model_path):
     model.to(device)
     model.reset()
     model.eval()
-    model.num_inference_steps = 50  # Number of diffusion steps
+    model.num_inference_steps = 32  # Number of diffusion steps
     
     # Set up noise scheduler
     noise_scheduler = diffusers.schedulers.scheduling_ddim.DDIMScheduler(
@@ -509,14 +515,14 @@ def main(args=None):
     
     # Create shared memory structures
     manager = Manager()
-    shared_obs = manager.dict(obs=None, paused=False)
+    shared_obs = manager.dict(obs=None, paused=False, exec_done=True)
     action_queue = Queue()
     start_time = time.monotonic()
 
     # Model path
-    model_path = '/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/models/2d_higher_res.ckpt'
+    model_path = '/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/models/new_setup_two_cam.ckpt'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    shape_meta  = load_shape_meta(model_path)
+    shape_meta = load_shape_meta(model_path)
 
     # Start inference process
     inference_process = Process(

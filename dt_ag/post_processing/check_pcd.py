@@ -10,22 +10,22 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # Configuration
-ZARR_PATH = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/3d_strawberry_dt/3d_strawberry_dt_50_zarr"
+ZARR_PATH = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/3d_strawberry_baseline/new_setup_100_baseline_zarr"
 EPISODE_NAME = "episode_0000"  # Change this to the episode you want to visualize
 
 # Camera intrinsics - ZED
 ZED_FX = 1069.73
 ZED_FY = 1069.73
-ZED_CX = 1135.86 - 400
-ZED_CY = 680.69 - 100
+ZED_CX = 1135.86
+ZED_CY = 680.69
 
 # ZED to xArm base transform
 T_BASE_ZED = np.array([
-    [ 0.0200602,  0.7492477, -0.6619859,  0.580],
-    [ 0.9983952,  0.0200602,  0.0529589,  0.020],
-    [ 0.0529589, -0.6619859, -0.7476429,  0.570],
-    [ 0.000,     0.000,      0.000,      1.000],
-], dtype=np.float32)
+    [-0.4949434,  0.2645439, -0.8276760, 0.590],
+    [ 0.8685291,  0.1218584, -0.4804246, 0.520],
+    [-0.0262341, -0.9566436, -0.2900771, 0.310],
+    [ 0.000,      0.000,      0.000,      1.000],
+], dtype=np.float32)  # Radians
 
 ## Identity transform for testing
 # T_BASE_ZED = np.eye(4, dtype=np.float32)

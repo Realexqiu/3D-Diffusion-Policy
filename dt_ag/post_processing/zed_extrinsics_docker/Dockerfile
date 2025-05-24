@@ -160,5 +160,8 @@ CMD ["/bin/bash"]
 #     -r camera_info:=/zed/zed_node/left/camera_info \
 #     -p size:=0.1
 
+# Tag in xarm base frame:
+    # [0.220, 0.007, 0.010] # x, y, z
+
 # ZED Left frame in xarm base frame:
-    # [0.58, 0.02, 0.57], [0.66, 0.66, -0.23, -0.27] # x, y, z, qx, qy, qz, qw
+    # [0.59, 0.52, 0.31], [0.41, 0.69, -0.52, -0.29] # x, y, z, qx, qy, qz, qw

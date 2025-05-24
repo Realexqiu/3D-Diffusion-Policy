@@ -33,7 +33,7 @@ class Spacemouse2Xarm(Node):
         self.arm.set_state(0)
 
         # --- SpaceMouse device ---
-        self.device = SpaceMouse(pos_sensitivity=1.0, rot_sensitivity=1.0)
+        self.device = SpaceMouse(pos_sensitivity=1.5, rot_sensitivity=1.5)
         self.device.start_control()
 
         # Track previous button states for edge detection
@@ -97,7 +97,7 @@ class Spacemouse2Xarm(Node):
             self.arm.set_mode(0)
             self.arm.set_state(0)
             self.arm.set_position(
-                x=166.8, y=1.8, z=244.8,
+                x=166.8, y=1.8, z=179.3,
                 roll=179.1, pitch=0, yaw=1.2,
                 speed=100, is_radian=False, wait=True
             )
@@ -114,7 +114,7 @@ class Spacemouse2Xarm(Node):
         self.arm.motion_enable(enable=True)
         self.arm.set_mode(0) # Position control mode
         self.arm.set_state(0)
-        self.arm.set_position(x=166.8, y=1.8, z=244.8, roll=179.1, pitch=0, yaw=1.2, speed=100, is_radian=False, wait=True)
+        self.arm.set_position(x=166.8, y=1.8, z=179.3, roll=179.1, pitch=0, yaw=1.2, speed=100, is_radian=False, wait=True)
         self.arm.motion_enable(enable=True)
         self.arm.set_mode(1) # Servo control mode
         self.arm.set_state(0)
@@ -230,7 +230,7 @@ class Spacemouse2Xarm(Node):
         self.gripper_pub.publish(Float32(data=self.gripper_position))
 
         # 8) Command the xArm
-        self.arm.set_servo_cartesian(new_pose, speed=100, mvacc=2000)
+        self.arm.set_servo_cartesian(new_pose, speed=150, mvacc=2000)
         self.arm.set_gripper_position(grasp)
 
         # Final step: update GUI & remember button states

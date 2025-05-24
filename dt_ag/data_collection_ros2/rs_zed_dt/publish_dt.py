@@ -26,11 +26,9 @@ class DualCameraPublisher(Node):
         self.target_exposure = 50
         
         # Create publishers for both cameras
-        self.left_publisher = self.create_publisher(
-            Image, f"RunCamera/image_raw_{self.left_camera_id}", 20)
+        self.left_publisher = self.create_publisher(Image, f"RunCamera/image_raw_{self.left_camera_id}", 20)
         
-        self.right_publisher = self.create_publisher(
-            Image, f"RunCamera/image_raw_{self.right_camera_id}", 20)
+        self.right_publisher = self.create_publisher(Image, f"RunCamera/image_raw_{self.right_camera_id}", 20)
         
         # Create camera capture objects
         self.left_cap = cv2.VideoCapture(self.left_camera_id)

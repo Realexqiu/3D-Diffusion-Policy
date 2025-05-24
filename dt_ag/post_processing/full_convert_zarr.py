@@ -1,272 +1,293 @@
 #!/usr/bin/env python3
 """
-Integrated HDF5 -> (GDINO + SAM-2) -> Zarr converter with DEBUG mode
-===================================================================
+Integrated HDF5 → (GDINO + SAM-2) → Zarr converter
+with automatic mask & frame dumping.
 
-This script processes either the entire dataset or, if DEBUGGING=True, only
-one episode (episode_0000). When debugging, every SAM-2 mask is dumped as a
-PNG so you can visually verify segmentation.
+If DEBUGGING is True we process only the first episode (episode_0000);
+otherwise we process every .hdf5 file.
+
+For *each* episode we now create:
+  extras_dir/
+     episode_0000/
+        masks/                 ← all per-frame mask PNGs
+        rs_rgb_first.png
+        rs_depth_first.png
+        zed_rgb_first.png
+        zed_depth_first.png
+        rs_rgb_last.png
+        rs_depth_last.png
+        zed_rgb_last.png
+        zed_depth_last.png
 """
 
+# ────────────────────────────────────────────────────────────────
+#  Standard imports
+# ────────────────────────────────────────────────────────────────
 import os, glob
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import cv2
+from PIL import Image
 import h5py
 import numpy as np
 import torch
 import zarr
 from natsort import natsorted
 from rich.console import Console
-from torchvision.ops import box_convert
 from tqdm import tqdm
 
-from sam2.build_sam import build_sam2_video_predictor
-from groundingdino.util.inference import load_model, predict, load_image
+from inference.custom_gsam_utils_v2 import GroundedSAM2 as GSamUtil, default_gsam_config
 
-# ────────────────────────────────────────────────────────────────
-#  Debug toggle
-# ────────────────────────────────────────────────────────────────
-DEBUGGING = False  # if True: only process episode_0000 and dump masks
-
-# ────────────────────────────────────────────────────────────────
-#  Configuration block
-# ────────────────────────────────────────────────────────────────
-CONFIG = {
-    # Data I/O ----------------------------------------------------
-    "HDF5_DIR": "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/3d_strawberry_baseline/3d_strawberry_baseline_50_hdf5",
-    "OUT_PATH": "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/3d_strawberry_baseline/3d_strawberry_baseline_50_zarr",
-
-    # ZED image cropping
-    "ZED_CROP": [400, 100, 1400, 2000],
-
-    # ZED left intrinsics (after crop)
-    "zed_fx": 1069.73,
-    "zed_fy": 1069.73,
-    "zed_cx": 1135.86 - 400,
-    "zed_cy": 680.69 - 100,
-
-    # Hard-coded ZED→xArm base transform
-    "T_base_zed": np.array([
-        [0.0200602,  0.7492477, -0.6619859, 0.580],
-        [0.9983952,  0.0200602,  0.0529589, 0.020],
-        [0.0529589, -0.6619859, -0.7476429, 0.570],
-        [0.000,      0.000,      0.000,      1.000],
-    ], dtype=np.float32),
-
-    # Grounding-DINO ---------------------------------------------
-    "GDINO_CKPT": "/home/alex/Documents/Grounded-SAM-2/gdino_checkpoints/groundingdino_swint_ogc.pth",
-    "GDINO_CFG":  "/home/alex/Documents/Grounded-SAM-2/grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py",
-    "BOX_THRESH": 0.30,
-    "TEXT_THRESH": 0.20,
-    "GDINO_QUERIES": ["red strawberry", "robot"],
-
-    # SAM-2 -------------------------------------------------------
-    "SAM2_CKPT": "/home/alex/Documents/segment-anything-2-real-time/checkpoints/sam2.1_hiera_base_plus.pt",
-    "SAM2_CFG":  "//home/alex/Documents/segment-anything-2-real-time/sam2/configs/sam2.1/sam2.1_hiera_b+.yaml",
-
-    # Point cloud settings ----------------------------------------
-    "POINTS_PER_CLOUD": 4096,  # ensures fixed-size output
-}
+DEBUGGING = False  # if True: only process episode_0000
 CONSOLE = Console()
 
 # ────────────────────────────────────────────────────────────────
 #  Helper functions
 # ────────────────────────────────────────────────────────────────
-def combine_masks(masks: List[np.ndarray]) -> np.ndarray:
-    if not masks:
-        return np.zeros((0,0), dtype=np.uint8)
-    m = np.zeros_like(masks[0], dtype=bool)
-    for x in masks:
-        m |= x.astype(bool)
-    return (m * 255).astype(np.uint8)
-
-def downsample_point_cloud(pc: np.ndarray, target: int) -> np.ndarray:
-    n = pc.shape[0]
-    if n >= target:
-        idx = np.random.choice(n, target, replace=False)
-        return pc[idx]
-    out = np.zeros((target, 6), dtype=np.float32)
-    out[:n] = pc
-    return out
-
-def depth_to_point_cloud(mask: np.ndarray, depth: np.ndarray, rgb_bgr: np.ndarray, fx: float, fy: float, cx: float, cy: float, T: np.ndarray) -> np.ndarray:
-    if mask.ndim == 3 and mask.shape[0] == 1:
-        mask = mask.squeeze(0)
-    if mask.shape != depth.shape:
-        mask = cv2.resize(mask, (depth.shape[1], depth.shape[0]), interpolation=cv2.INTER_NEAREST)
-    v, u = np.where(mask > 0)
-    Z = depth[v, u]
-    valid = np.isfinite(Z) & (Z > 1e-6)
-    if not valid.any():
-        return np.empty((0,6), dtype=np.float32)
-    u, v, Z = u[valid], v[valid], Z[valid]
-    X = (u - cx) * Z / fx
-    Y = (v - cy) * Z / fy
-    pts_cam = np.stack([X, Y, Z, np.ones_like(Z)], axis=1)
-    pts_base = (T @ pts_cam.T).T[:, :3]
-    rgb = rgb_bgr[v, u][:, ::-1] / 255.0
-    return np.hstack([pts_base, rgb]).astype(np.float32)
-
-
 def hdf5_to_dict(pth: str) -> Dict[str, np.ndarray]:
-    with h5py.File(pth, 'r') as f:
+    with h5py.File(pth, "r") as f:
         return {k: f[k][()] for k in f.keys()}
 
+def ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+def save_depth_png(depth: np.ndarray, out_file: Path) -> None:
+    """Normalize a float32 depth map, apply viridis colormap, save to PNG."""
+    depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+    if depth.max() == depth.min():
+        norm = np.zeros_like(depth, dtype=np.uint8)
+    else:
+        norm = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX)
+    norm = norm.astype(np.uint8)
+    color = cv2.applyColorMap(norm, cv2.COLORMAP_VIRIDIS)
+    cv2.imwrite(str(out_file), color)
+
+def dump_first_last_frames(rs_rgb: np.ndarray, rs_depth: np.ndarray, zed_rgb: np.ndarray, zed_depth: np.ndarray, ep_dir: Path) -> None:
+    """Save first/last RGB & depth frames for RS and ZED cameras."""
+    ensure_dir(ep_dir)
+    first, last = 0, rs_rgb.shape[0] - 1
+    for idx, tag in [(first, "first"), (last, "last")]:
+        # RS RGB
+        cv2.imwrite(str(ep_dir / f"rs_rgb_{tag}.png"), rs_rgb[idx])
+        # RS depth
+        save_depth_png(rs_depth[idx], ep_dir / f"rs_depth_{tag}.png")
+        # ZED RGB
+        cv2.imwrite(str(ep_dir / f"zed_rgb_{tag}.png"), zed_rgb[idx])
+        # ZED depth
+        save_depth_png(zed_depth[idx], ep_dir / f"zed_depth_{tag}.png")
+
+def check_episode_complete(zarr_group, episode_name: str) -> bool:
+    """Check if an episode has been completely processed."""
+    if episode_name not in zarr_group:
+        return False
+    
+    ep_group = zarr_group[episode_name]
+    required_arrays = ["rs_rgb", "rs_depth", "zed_rgb", "zed_depth", "zed_pcd", "agent_pos", "action"]
+    
+    for array_name in required_arrays:
+        if array_name not in ep_group:
+            CONSOLE.log(f"[yellow]Episode {episode_name} missing {array_name}, will reprocess")
+            return False
+    
+    # Check if the episode has the expected length attribute
+    if "length" not in ep_group.attrs:
+        CONSOLE.log(f"[yellow]Episode {episode_name} missing length attribute, will reprocess")
+        return False
+    
+    return True
+
+def get_processed_episodes(zarr_dir: Path) -> set:
+    """Get set of already processed episode names."""
+    processed = set()
+    
+    if not zarr_dir.exists():
+        return processed
+    
+    try:
+        root = zarr.open(zarr_dir, mode="r")
+        for key in root.keys():
+            if key.startswith("episode_") and check_episode_complete(root, key):
+                processed.add(key)
+        CONSOLE.log(f"[green]Found {len(processed)} already processed episodes")
+        if processed:
+            sorted_episodes = sorted(processed)
+            CONSOLE.log(f"[green]Processed episodes: {sorted_episodes[0]} to {sorted_episodes[-1]}")
+    except Exception as e:
+        CONSOLE.log(f"[yellow]Could not read existing Zarr file: {e}")
+    
+    return processed
+
 # ────────────────────────────────────────────────────────────────
-#  GDINO + SAM-2 pipeline with mask-dump logging
+#  GSAM wrapper
 # ────────────────────────────────────────────────────────────────
 class GSAM2:
-    def __init__(self, cfg: Dict):
-        self.cfg = cfg
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        CONSOLE.log(f"[blue]Init models on {self.device}…")
-        self.gdino = load_model(model_config_path=cfg["GDINO_CFG"], model_checkpoint_path=cfg["GDINO_CKPT"], device=self.device)
-        self.video_predictor = build_sam2_video_predictor(cfg["SAM2_CFG"], cfg["SAM2_CKPT"], device=self.device)
-        CONSOLE.log("[green]Models ready.")
+    def __init__(self):
+        self.cfg  = default_gsam_config()
+        self.util = GSamUtil(cfg=self.cfg, use_weights=True)
 
-    def process_episode(self, zed_rgb_seq: np.ndarray, zed_depth_seq: np.ndarray, mask_dump_dir: Optional[Path] = None) -> List[np.ndarray]:
-        T, H, W, _ = zed_rgb_seq.shape
-        masks: Dict[int, np.ndarray] = {}
+    def process_episode(self, frames: np.ndarray, depths: np.ndarray, mask_dump_dir: Path) -> List[np.ndarray]:
+        """Runs Grounded SAM-2 tracking + PCD generation for an episode."""
+        T = len(frames)
+        ensure_dir(mask_dump_dir)
 
-        # Create a temporary directory to store video frames as JPEG images.
-        tmp = Path("__tmp_gsam2_frames")
-        tmp.mkdir(exist_ok=True)
+        # ── detect boxes on the first frame ─────────────────────────
+        boxes, ok = self.util.detect_boxes(frames[0])
+        if not ok:
+            empty = np.zeros((T, self.cfg["pts_per_pcd"], 6), np.float32)
+            return [pc for pc in empty]
 
-        # Save each frame from the sequence.
-        for t in range(T):
-            cv2.imwrite(str(tmp / f"{t:04d}.jpg"), zed_rgb_seq[t])
+        # ── initialise masks & tracking ─────────────────────────────
+        init_masks = self.util.init_track(frames[0], boxes)
 
-        # Process the first frame to detect objects using GDINO.
-        image, image_transformed = load_image(str(tmp / "0000.jpg"))
-        boxes = []
-        for caption in self.cfg["GDINO_QUERIES"]:
-            boxes, logits_, phrases = predict(
-                model=self.gdino,
-                image=image_transformed,
-                caption=caption,
-                box_threshold=self.cfg["BOX_THRESH"],
-                text_threshold=self.cfg["TEXT_THRESH"]
-            )
-            if boxes.numel():
-                boxes.append(boxes)
+        # decide storage based on weighted flag
+        if self.util.use_weights:
+            masks: Dict[int, Union[np.ndarray, Dict[int, np.ndarray]]] = {0: init_masks}
+        else:
+            combined0 = np.zeros_like(next(iter(init_masks.values())), np.uint8)
+            for m in init_masks.values():
+                combined0 |= m
+            masks = {0: combined0}
 
-        # If no boxes are detected, log the issue and return empty point clouds.
-        if not boxes:
-            CONSOLE.log("[red]No boxes found; skipping masks.")
-            empty = np.zeros((self.cfg["POINTS_PER_CLOUD"], 6), dtype=np.float32)
-            return [empty.copy() for _ in range(T)]
+        # dump initial masks
+        for obj_id, m in init_masks.items():
+            Image.fromarray(m).save(mask_dump_dir / f"frame_0000_obj{obj_id}_mask.png")
+        if not self.util.use_weights:
+            Image.fromarray(masks[0]).save(mask_dump_dir / "frame_0000_combined_mask.png")
 
-        # Concatenate boxes, rescale them to image dimensions, and convert to xyxy format.
-        B = torch.cat(boxes, 0) * torch.tensor([W, H, W, H], device=boxes[0].device)
-        xyxy = box_convert(B, in_fmt="cxcywh", out_fmt="xyxy").cpu().numpy()
-
-        # Initialize the SAM-2 video predictor with the temporary video.
-        state = self.video_predictor.init_state(video_path=str(tmp))
-        for i, box in enumerate(xyxy, start=1):
-            self.video_predictor.add_new_points_or_box(
-                inference_state=state,
-                frame_idx=0,
-                obj_id=i,
-                box=box.astype(np.float32)
-            )
-
-        # Propagate predictions through the video and combine the masks for each frame.
-        for f_idx, obj_ids, logits in self.video_predictor.propagate_in_video(state):
-            mlist = [(logits[i] > 0).cpu().numpy() for i in range(len(obj_ids))]
-            masks[f_idx] = combine_masks(mlist)
-
-        # Optionally dump mask images for debugging.
-        if mask_dump_dir:
-            CONSOLE.log(f"[yellow]Dumping {len(masks)} masks to {mask_dump_dir}")
-            mask_dump_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                from PIL import Image
-            except ImportError:
-                CONSOLE.log("[red]PIL not installed; cannot dump mask images.")
+        # ── propagate masks through subsequent frames ───────────────
+        for t in range(1, T):
+            prop = self.util.propagate(frames[t])
+            if isinstance(prop, dict):
+                if self.util.use_weights:
+                    masks[t] = prop
+                else:
+                    combined = np.zeros_like(next(iter(prop.values())), np.uint8)
+                    for m in prop.values():
+                        combined |= m
+                    masks[t] = combined
             else:
-                for f in range(T):
-                    m = masks.get(f, np.zeros((H, W), dtype=np.uint8))
-                    # Ensure the mask is 2D.
-                    if m.ndim != 2:
-                        m = np.squeeze(m)
-                    img = Image.fromarray(m.astype(np.uint8), mode='L')
-                    outp = mask_dump_dir / f"mask_{f:04d}.png"
-                    try:
-                        img.save(str(outp))
-                    except Exception as e:
-                        CONSOLE.log(f"[red]Failed to save mask {f:04d}: {e}")
+                masks[t] = prop
 
-        # Build point clouds from the depth maps using the computed masks.
-        clouds = []
+        # dump propagated masks
+        for t, m in masks.items():
+            if isinstance(m, np.ndarray):
+                Image.fromarray(m).save(mask_dump_dir / f"mask_{t:04d}.png")
+
+        # ── generate point clouds ───────────────────────────────────
+        pcds = []
         for t in range(T):
-            m = masks.get(t, np.zeros((H, W), dtype=np.uint8))
-            pc = depth_to_point_cloud(
-                mask=m,
-                depth=zed_depth_seq[t],
-                rgb_bgr=zed_rgb_seq[t],
-                fx=self.cfg["zed_fx"],
-                fy=self.cfg["zed_fy"],
-                cx=self.cfg["zed_cx"],
-                cy=self.cfg["zed_cy"],
-                T=self.cfg["T_base_zed"]
-            )
-            clouds.append(downsample_point_cloud(pc, self.cfg["POINTS_PER_CLOUD"]))
-
-        # Clean up: remove temporary images and delete the temporary directory.
-        for f in tmp.glob("*.jpg"):
-            f.unlink()
-        tmp.rmdir()
-
-        return clouds
+            mask_input = masks[t]
+            pcd = self.util._make_pcd(mask_input, depths[t], frames[t])
+            pcds.append(pcd)
+        return pcds
 
 # ────────────────────────────────────────────────────────────────
-#  Main conversion
+#  Main conversion routine
 # ────────────────────────────────────────────────────────────────
-def main():
-    cfg = CONFIG
-    H5 = Path(cfg["HDF5_DIR"])
-    OUT = Path(cfg["OUT_PATH"])
-    OUT.mkdir(parents=True, exist_ok=True)
+def main() -> None:
+    H5_DIR  = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/3d_strawberry_baseline/new_setup_100_baseline")
+    ZARR_DIR = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/3d_strawberry_baseline/new_setup_100_baseline_zarr")
+    ZARR_DIR.mkdir(parents=True, exist_ok=True)
 
-    files = natsorted(glob.glob(str(H5/"*.hdf5")))
+    # extras directory lives next to the Zarr output
+    if ZARR_DIR.name.endswith("_zarr"):
+        debug_name = ZARR_DIR.name.replace("_zarr", "_debug")
+    else:
+        debug_name = f"{ZARR_DIR.name}_debug"
+    DEBUG_DIR = ZARR_DIR.parent / debug_name
+    ensure_dir(DEBUG_DIR)
+
+    files = natsorted(glob.glob(str(H5_DIR / "*.hdf5")))
     if not files:
-        CONSOLE.log(f"[red]No HDF5 files in {H5}"); return
+        CONSOLE.log(f"[red]No HDF5 files found in {H5_DIR}")
+        return
 
-    g2 = GSAM2(cfg)
-    root = zarr.open(OUT, mode="w")
+    # Check which episodes are already processed
+    processed_episodes = get_processed_episodes(ZARR_DIR)
+    
+    gsam = GSAM2()
+    
+    # Open Zarr in append mode to add new episodes
+    root = zarr.open(ZARR_DIR, mode="a")
 
-    for idx, path in enumerate(tqdm(files, desc="Episodes")):
-        if DEBUGGING and idx>0: break
+    # Count episodes to process
+    episodes_to_process = []
+    for idx, path in enumerate(files):
+        episode_name = f"episode_{idx:04d}"
+        if episode_name not in processed_episodes:
+            episodes_to_process.append((idx, path, episode_name))
+        if DEBUGGING and len(episodes_to_process) >= 1:
+            break
 
-        # load
-        d = hdf5_to_dict(path)
-        T = d["pose"].shape[0]
-        rs_rgb, rs_depth = d["rs_color_images"], d["rs_depth_images"]
-        zed_rgb, zed_depth = d["zed_color_images"], d["zed_depth_images"]
-        x,y,w,h = cfg["ZED_CROP"]
-        zed_rgb = zed_rgb[:,y:y+h,x:x+w]
-        zed_depth = zed_depth[:,y:y+h,x:x+w]
+    if not episodes_to_process:
+        CONSOLE.log("[green]All episodes already processed!")
+        return
 
-        # prepare mask dump dir
-        debug_dir = (OUT/"debug_masks"/f"episode_{idx:04d}") if DEBUGGING else None
+    CONSOLE.log(f"[blue]Processing {len(episodes_to_process)} remaining episodes...")
 
-        # process
-        pcds = g2.process_episode(zed_rgb, zed_depth, mask_dump_dir=debug_dir)
-        arr = np.stack(pcds,axis=0)
+    # ────────────────────────────────────────────────────────────
+    for idx, path, episode_name in tqdm(episodes_to_process, desc="Episodes"):
+        CONSOLE.log(f"[blue]Processing {episode_name} ({idx+1}/{len(files)})")
 
-        # store
-        grp = root.create_group(f"episode_{idx:04d}")
-        grp.array("rs_rgb", rs_rgb, dtype=np.uint8, chunks=(1,*rs_rgb.shape[1:]))
-        grp.array("rs_depth", rs_depth, dtype=np.float32, chunks=(1,*rs_depth.shape[1:]))
-        grp.array("zed_rgb", zed_rgb, dtype=np.uint8, chunks=(1,*zed_rgb.shape[1:]))
-        grp.array("zed_depth",zed_depth,dtype=np.float32,chunks=(1,*zed_depth.shape[1:]))
-        grp.array("zed_pcd",arr,dtype=np.float32,chunks=(1,*arr.shape[1:]))
-        grp.array("agent_pos",d["pose"],dtype=np.float32)
-        grp.array("action",d["last_pose"]-d["pose"],dtype=np.float32)
-        grp.attrs["length"] = T
+        # ―― load episode ―――――――――――――――――――――――――――――――――――――
+        try:
+            data = hdf5_to_dict(path)
+        except Exception as e:
+            CONSOLE.log(f"[red]Error loading {path}: {e}")
+            continue
 
-    CONSOLE.log(f"[green]Wrote { (1 if DEBUGGING else len(files)) } episode(s) to {OUT }")
+        T = data["pose"].shape[0]
+        rs_rgb = data["rs_color_images"]
+        rs_depth = data["rs_depth_images"]
+        zed_rgb = data["zed_color_images"]
+        zed_depth= data["zed_depth_images"]
 
-if __name__=="__main__": main()
+        # episode-specific extras directory
+        ep_dir = DEBUG_DIR / episode_name
+        mask_dir = ep_dir / "masks"
+
+        try:
+            # ―― GSAM → masks → point clouds ―――――――――――――――――――――
+            pcds = gsam.process_episode(zed_rgb, zed_depth, mask_dump_dir=mask_dir)
+            pcds_arr = np.stack(pcds, axis=0)  # (T, K, 6)
+
+            # ―― save first / last frames ――――――――――――――――――――――
+            dump_first_last_frames(rs_rgb, rs_depth, zed_rgb, zed_depth, ep_dir)
+
+            # ―― store episode to Zarr ―――――――――――――――――――――――――
+            # Remove existing group if it exists (in case of partial processing)
+            if episode_name in root:
+                del root[episode_name]
+            
+            grp = root.create_group(episode_name)
+            grp.array("rs_rgb",    rs_rgb,    dtype=np.uint8,  chunks=(1, *rs_rgb.shape[1:]))
+            grp.array("rs_depth",  rs_depth,  dtype=np.float32,chunks=(1, *rs_depth.shape[1:]))
+            grp.array("zed_rgb",   zed_rgb,   dtype=np.uint8,  chunks=(1, *zed_rgb.shape[1:]))
+            grp.array("zed_depth", zed_depth, dtype=np.float32,chunks=(1, *zed_depth.shape[1:]))
+            grp.array("zed_pcd",   pcds_arr,  dtype=np.float32,chunks=(1, *pcds_arr.shape[1:]))
+            grp.array("agent_pos", data["pose"],               dtype=np.float32)
+            grp.array("action",    data["last_pose"] - data["pose"], dtype=np.float32)
+            grp.attrs["length"] = T
+
+            CONSOLE.log(f"[green]✓ Completed {episode_name}")
+            
+            # Reset GSAM state for next episode to avoid memory issues
+            gsam.util.reset()
+            
+        except Exception as e:
+            CONSOLE.log(f"[red]Error processing {episode_name}: {e}")
+            # Clean up partial episode data
+            if episode_name in root:
+                del root[episode_name]
+            continue
+
+    processed_count = len(episodes_to_process)
+    total_count = 1 if DEBUGGING else len(files)
+    CONSOLE.log(f"[green]Finished.[/] Processed {processed_count} new episodes")
+    CONSOLE.log(f"[green]Total episodes in Zarr: {len(root.keys())}/{total_count}")
+    CONSOLE.log(f"[green]Extra masks & frames saved under {DEBUG_DIR}")
+
+# ────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    main()

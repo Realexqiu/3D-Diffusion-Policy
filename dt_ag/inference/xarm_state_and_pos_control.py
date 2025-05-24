@@ -57,12 +57,12 @@ class CombinedXArmNode(Node):
         self.state_timer = self.create_timer(1.0 / 20.0, self.state_timer_callback)
 
         # Reset and gripper open
-        self.reset_callback(Bool(data=True))
         self.arm.set_gripper_mode(0)      # location mode
         self.arm.set_gripper_enable(True) # power the driver
         self.arm.set_gripper_speed(5000)  # any speed you like (1-5000)
         self.arm.clean_gripper_error()    # clear residual errors
         self.gripper_callback(Float32(data=0.0))
+        self.reset_callback(Bool(data=True))
 
         self.get_logger().info('Combined XArm node initialized successfully')
 
@@ -169,7 +169,7 @@ class CombinedXArmNode(Node):
             
             # Reset position (in mm and degrees)
             self.arm.set_position(
-                x=166.8, y=1.8, z=244.8, 
+                x=166.8, y=1.8, z=179.3, 
                 roll=179.1, pitch=0, yaw=1.2, 
                 speed=100, is_radian=False, wait=True
             )

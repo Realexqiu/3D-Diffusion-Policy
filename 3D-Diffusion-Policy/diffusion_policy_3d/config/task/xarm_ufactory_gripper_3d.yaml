@@ -1,0 +1,29 @@
+# xarm_strawberry_pick.yaml
+
+name: xarm_ufactory_gripper
+
+task_name: xarm_ufactory_gripper
+
+dataset:
+  _target_: diffusion_policy_3d.dataset.xarm_3d_dataset.XArmBaselineDataset
+  zarr_path: /home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/3d_strawberry_baseline/new_setup_100_baseline_zarr
+  horizon: 8
+  future_action: 8
+
+env_runner: null
+
+shape_meta:
+  obs:
+    rgb:
+      shape: [2, 720, 1280, 3]
+      dtype: uint8
+    point_cloud:
+      shape: [1024, 6]
+      dtype: float32
+    agent_pos:
+      shape: [7]       # [x y z qw qx qy qz]
+      dtype: float32
+
+  action:
+    shape: [7]
+    dtype: float32

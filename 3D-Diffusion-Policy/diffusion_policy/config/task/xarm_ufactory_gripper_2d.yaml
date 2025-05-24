@@ -1,0 +1,29 @@
+# Task: xArm strawberry-picking  – 2-D RGB-only dataset
+name:           xarm_ufactory_gripper_2d       # shows up in log dirs
+task_name:      xarm_ufactory_gripper_2d
+
+# ------------------------------------------------------------------
+dataset:
+  _target_: diffusion_policy.dataset.xarm_2d_dataset.XArmImageDataset2D
+  zarr_path: /home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/3d_strawberry_baseline/new_setup_100_baseline_zarr_2d
+  horizon: 8                     # obs window
+  pad_before: 0                  # default for image dataset
+  pad_after: 0
+  seed: 42
+  val_ratio: 0.0
+  max_train_episodes: null
+
+env_runner: null                 # offline BC only
+
+# ------------------------------------------------------------------
+# Shapes for encoder and diffusion head
+shape_meta: &shape_meta
+  obs:
+    image:
+      shape: [3, 360, 640]       # (C,H,W) after your resize script
+      type: rgb
+    agent_pos:
+      shape: [7]                 # x y z qw qx qy qz
+      type: low_dim
+  action:
+    shape: [7]

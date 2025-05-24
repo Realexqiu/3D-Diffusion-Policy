@@ -22,8 +22,8 @@ def default_gsam_config() -> Dict:
         "gdino_cfg": "/home/alex/Documents/Grounded-SAM-2/grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py",
         "gdino_ckpt": "/home/alex/Documents/Grounded-SAM-2/gdino_checkpoints/groundingdino_swint_ogc.pth",
         "queries": ["red strawberry", "robot"],
-        "box_thresh": 0.3,
-        "text_thresh": 0.2,
+        "box_thresh": 0.35,
+        "text_thresh": 0.3,
 
         # SAM‑2
         "sam2_cfg": "//home/alex/Documents/segment-anything-2-real-time/sam2/configs/sam2.1/sam2.1_hiera_b+.yaml",        
@@ -32,16 +32,15 @@ def default_gsam_config() -> Dict:
         # Camera intrinsics
         "zed_intri": {"fx": 1069.73, "fy": 1069.73, "cx": 1135.86, "cy": 680.69},
 
-        # Camera ➜ base transform
-        "T_base_cam": np.array([
-                    [0.0200602,  0.7492477, -0.6619859, 0.580],
-                    [0.9983952,  0.0200602,  0.0529589, 0.020],
-                    [0.0529589, -0.6619859, -0.7476429, 0.570],
-                    [0.0,        0.0,        0.0,       1.0],
-                ], dtype=np.float32),
+        "T_base_zed": np.array([
+            [-0.4949434,  0.2645439, -0.8276760, 0.590],
+            [0.8685291,  0.1218584, -0.4804246, 0.520],
+            [-0.0262341, -0.9566436, -0.2900771, 0.310],
+            [0.000,      0.000,      0.000,      1.000],
+        ], dtype=np.float32),
 
         # Point‑cloud size
-        "pts_per_pcd": 2048,
+        "pts_per_pcd": 1024,
         "fruit_fraction": 1 / 3,
     }
 
@@ -51,8 +50,8 @@ class GroundedSAM2:
     def __init__(self, *, cfg: Dict, device: Optional[str] = None, tmp_dir="__tmp_gsam2_frames"):
         # pull values out of config dict
         self.cfg = cfg               
-        self.text_queries   = cfg["queries"]
-        self.box_threshold  = cfg["box_thresh"]
+        self.text_queries = cfg["queries"]
+        self.box_threshold = cfg["box_thresh"]
         self.text_threshold = cfg["text_thresh"]
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -288,7 +287,7 @@ class GroundedSAM2:
         colours = rgb.astype(np.float32)                 # (N,3)  0-1
 
         # Crop points within bounds
-        points, colours = self.crop_points_within_bounds(points, colours, self.MIN_BOUNDS, self.MAX_BOUNDS)
+        points, colours = self.crop_points_within_bounds(points, colours)
             
         if len(points) > pts_per_pcd:      
             pts_t = torch.from_numpy(points).to("cuda")   # (N,3) 
@@ -319,8 +318,8 @@ class GroundedSAM2:
         robot_pts, robot_rgb = self._compute_point_cloud(rgb_bgr, depth, robot_masks)
 
         # ----- workspace crop (re-use your member fn)
-        fruit_pts, fruit_rgb = self.crop_points_within_bounds(fruit_pts, fruit_rgb, self.MIN_BOUNDS, self.MAX_BOUNDS)
-        robot_pts, robot_rgb = self.crop_points_within_bounds(robot_pts, robot_rgb, self.MIN_BOUNDS, self.MAX_BOUNDS)
+        fruit_pts, fruit_rgb = self.crop_points_within_bounds(fruit_pts, fruit_rgb)
+        robot_pts, robot_rgb = self.crop_points_within_bounds(robot_pts, robot_rgb)
 
         # ----- FPS down-sample with weighting
         frac = float(self.cfg.get("fruit_fraction", 1 / 3))
@@ -389,10 +388,24 @@ class GroundedSAM2:
             m |= x.astype(bool)
         return (m * 255).astype(np.uint8)
     
-    def crop_points_within_bounds(self, points, colors, min_bounds, max_bounds):
+    def crop_points_within_bounds(self, points, colors, min_bounds=None, max_bounds=None):
         """
-        crop points within a bounding box
+        Crop points within a bounding box.
+        
+        Args:
+            points: numpy array of shape (N,3) containing XYZ coordinates
+            colors: numpy array of shape (N,3) containing RGB colors
+            min_bounds: minimum bounds for XYZ coordinates, defaults to self.MIN_BOUNDS
+            max_bounds: maximum bounds for XYZ coordinates, defaults to self.MAX_BOUNDS
+            
+        Returns:
+            tuple of (filtered_points, filtered_colors)
         """
+        if min_bounds is None:
+            min_bounds = self.MIN_BOUNDS
+        if max_bounds is None:
+            max_bounds = self.MAX_BOUNDS
+            
         # Create a mask for points within the bounding box
         mask = np.all((points >= min_bounds) & (points <= max_bounds), axis=1)
 

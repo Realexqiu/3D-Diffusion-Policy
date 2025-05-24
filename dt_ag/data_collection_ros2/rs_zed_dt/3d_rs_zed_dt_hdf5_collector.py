@@ -6,6 +6,7 @@ import h5py
 
 import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
 
 # ROS messages
 from std_msgs.msg import Bool, Float32
@@ -23,15 +24,6 @@ class XArmDataCollection(Node):
     def __init__(self):
         super().__init__('xarm_data_collection_node')
         self.get_logger().info("Initializing data_collection_node with approximate sync.")
-
-        # ==========================================================
-        # Add rate limiting parameters
-        # ==========================================================
-        self.desired_rate = 10.0  # Hz 
-        self.last_processed_time = self.get_clock().now()
-        self.frame_count = 0
-        self.last_rate_report_time = self.get_clock().now()
-        self.rate_report_interval = 2.0 
 
         # ==========================================================
         # Create message_filters Subscribers for RealSense + Robot
@@ -76,7 +68,7 @@ class XArmDataCollection(Node):
         self.is_collecting = False
 
         # start number
-        self.demo_count = 12
+        self.demo_count = 0
 
         # Robot data
         self.pose_data = []
@@ -94,6 +86,14 @@ class XArmDataCollection(Node):
         self.dt_left_frames = []
         self.dt_right_frames = []
 
+        # Throttle to 5 Hz
+        self.collection_frequency = 5.0
+        self.min_period = 1.0 / self.collection_frequency
+        self.last_saved_time = self.get_clock().now() - Duration(seconds=self.min_period)
+
+        # Episode timing
+        self.episode_start_time = None
+
     ####################################################################
     # Start/End Demos
     ####################################################################
@@ -101,6 +101,7 @@ class XArmDataCollection(Node):
         if msg.data and not self.is_collecting:
             self.get_logger().info("Starting a new demonstration.")
             self.is_collecting = True
+            self.episode_start_time = self.get_clock().now()
 
             # Clear buffers
             self.pose_data.clear()
@@ -117,6 +118,16 @@ class XArmDataCollection(Node):
             self.get_logger().info("Ending demonstration and saving.")
             self.is_collecting = False
             self.save_demonstration()
+
+            end_time = self.get_clock().now()
+            duration = (end_time - self.episode_start_time).nanoseconds / 1e9 if self.episode_start_time else 0.0
+
+            # Compute number of frames saved
+            num_frames = len(self.pose_data)
+            rate = num_frames / duration if duration > 0 else float('nan')
+
+            # Log summary
+            self.get_logger().info(f"Episode {self.demo_count} ended: Length = {duration:.2f}s, Num_frames = {num_frames}, Freq. = {rate:.2f}Hz")
             self.demo_count += 1
 
     ####################################################################
@@ -134,29 +145,19 @@ class XArmDataCollection(Node):
         """
         Called when (Pose, Gripper, RealSense color, RealSense depth)
         arrive (approximately) at the same time. We'll also grab from the ZED here.
-        """
-        current_time = self.get_clock().now()
-        
-        # Calculate time since last report to periodically show the actual rate
-        time_since_report = (current_time - self.last_rate_report_time).nanoseconds / 1e9
-        if time_since_report >= self.rate_report_interval and self.frame_count > 0:
-            actual_rate = self.frame_count / time_since_report
-            # self.get_logger().info(f"Current processing rate: {actual_rate:.2f} Hz over the last {time_since_report:.1f} seconds")
-            self.frame_count = 0
-            self.last_rate_report_time = current_time
-        
+        """        
         # Skip if not collecting
         if not self.is_collecting:
             return
         
-        # Apply rate limiting - only process if enough time has passed
-        elapsed = (current_time - self.last_processed_time).nanoseconds / 1e9  # seconds
-        if elapsed < (1.0 / self.desired_rate):
+        now = self.get_clock().now()
+        elapsed = (now - self.last_saved_time).nanoseconds / 1e9
+        if elapsed < self.min_period:
             return
-            
-        # Update last processed time
-        self.last_processed_time = current_time
-        self.frame_count += 1
+        
+        self.get_logger().info(f"In synced_callback")
+
+        self.last_saved_time = now
 
         # Robot pose/gripper
         p = pose_msg.pose.position

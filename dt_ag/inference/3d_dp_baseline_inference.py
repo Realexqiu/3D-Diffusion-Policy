@@ -25,7 +25,9 @@ import time
 import diffusers
 import hydra
 import dill
-import open3d as o3d
+
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup
 
 # Custom gsam utilities
 from custom_gsam_utils import GroundedSAM2, default_gsam_config
@@ -49,7 +51,7 @@ from gendp.model.common.rotation_transformer import RotationTransformer
 
 
 class PolicyNode3D(Node):
-    def __init__(self, shared_obs, action_queue, pending_counter, lock, gsam_config):
+    def __init__(self, shared_obs, action_queue, gsam_config, start_time):
         super().__init__('Policy_Node')
 
         # --- QoS tuned for high-rate image streams ---
@@ -63,8 +65,8 @@ class PolicyNode3D(Node):
 
         self.sync = message_filters.ApproximateTimeSynchronizer(
             [self.pose_sub, self.zed_rgb_sub, self.zed_depth_sub, self.gripper_sub], 
-            queue_size=10,         # how many "unmatched" msgs to keep
-            slop=0.33,
+            queue_size=30,         # how many "unmatched" msgs to keep
+            slop=0.3,
             allow_headerless=True)  # Allow messages without headers
         
         self.sync.registerCallback(self.synced_obs_callback)
@@ -81,11 +83,10 @@ class PolicyNode3D(Node):
         self.shared_obs = shared_obs
         self.action_queue = action_queue
         self.dt = 0.05  
-        self.pending_counter = pending_counter
-        self.lock = lock
+        self.start_time = start_time
         
         # ─────── Visualization ────────
-        self.visualizer = Visualizer(camera_position='front')
+        self.visualizer = Visualizer(camera_position='isometric')
         t = threading.Thread(
             target=self.visualizer.run,
             kwargs={'host': '0.0.0.0', 'port': 8050}, 
@@ -189,49 +190,52 @@ class PolicyNode3D(Node):
         pygame.quit()
 
     # Create helper method to save images
-    def save_data(self, zed_rgb_msg, zed_depth_msg, rs_msg=None, debug_dir=Path("debug")):
-        """Save RGB and depth images for debugging"""
+    def save_data(self, zed_rgb_msg, zed_depth_msg, debug_mask, boxes_np, debug_dir=Path("debug_3d_dp")):
+        """Save data for debugging"""
         debug_dir.mkdir(parents=True, exist_ok=True)
 
-        # Check if zed_rgb_msg is a numpy array
+        # 1. RGB
         if isinstance(zed_rgb_msg, np.ndarray):
-            # Convert from CHW float32 normalized to HWC uint8 for OpenCV
-            if zed_rgb_msg.shape[0] == 3:  # CHW format
-                # Denormalize back to 0-255 range, transpose to HWC, and convert to uint8
-                zed_rgb_img = (zed_rgb_msg * 255).astype(np.uint8).transpose(1, 2, 0)
-            else:
-                zed_rgb_img = zed_rgb_msg
+            rgb_bgr = zed_rgb_msg
         else:
-            # Convert RGB image
-            zed_rgb_img = self._bridge.imgmsg_to_cv2(zed_rgb_msg, desired_encoding='bgr8')
-        
-        # Save converted images
-        cv2.imwrite(str(debug_dir/f"zed_rgb.jpg"), zed_rgb_img)
-        
-        # Convert depth image 
+            rgb_bgr = self._bridge.imgmsg_to_cv2(zed_rgb_msg, desired_encoding='bgr8')
+        cv2.imwrite(str(debug_dir / "zed_rgb.jpg"), rgb_bgr)
+
+        # 2. Depth → colormap
         if zed_depth_msg is not None:
             if isinstance(zed_depth_msg, np.ndarray):
-                zed_depth_img = zed_depth_msg
+                depth = zed_depth_msg
             else:
-                zed_depth_img = self._bridge.imgmsg_to_cv2(zed_depth_msg, desired_encoding='passthrough')
-                
-            # Normalize and colorize depth image
-            d8 = cv2.normalize(zed_depth_img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            vis = cv2.applyColorMap(d8, cv2.COLORMAP_JET)
-            cv2.imwrite(str(debug_dir/f"zed_depth.jpg"), vis)
-        
-        # Save RealSense image if provided
-        if rs_msg is not None:
-            if isinstance(rs_msg, np.ndarray):
-                # Convert from CHW float32 normalized to HWC uint8 for OpenCV
-                if rs_msg.shape[0] == 3:  # CHW format
-                    # Denormalize back to 0-255 range, transpose to HWC, and convert to uint8
-                    rs_img = (rs_msg * 255).astype(np.uint8).transpose(1, 2, 0)
-                else:
-                    rs_img = rs_msg
+                depth = self._bridge.imgmsg_to_cv2(zed_depth_msg, desired_encoding='32FC1')
+            # clip to a reasonable range (e.g. 0–3 m) and normalize
+            clipped = np.clip(depth, 0.0, 3.0)
+            disp = (clipped / 3.0 * 255).astype(np.uint8)
+            depth_color = cv2.applyColorMap(disp, cv2.COLORMAP_JET)
+            cv2.imwrite(str(debug_dir / "zed_depth.jpg"), depth_color)
+
+        # 3. Boxes annotated
+        if boxes_np is not None and len(boxes_np):
+            # assume boxes_np is Nx4 or Nx5 (x1,y1,x2,y2[,score])
+            ann = rgb_bgr.copy()
+            for bb in boxes_np:
+                x1, y1, x2, y2 = bb[:4].astype(int)
+                cv2.rectangle(ann, (x1, y1), (x2, y2), (0,255,0), 2)
+                if bb.shape[-1] > 4:
+                    score = bb[4]
+                    cv2.putText(ann, f"{score:.2f}", (x1, y1-4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+            cv2.imwrite(str(debug_dir / "boxes_annotated.jpg"), ann)
+
+        # 4. Fused mask
+        if debug_mask is not None:
+            # assume mask is HxW float in [0,1] or uint8 0/255
+            if debug_mask.dtype != np.uint8:
+                m = (debug_mask * 255).astype(np.uint8)
             else:
-                rs_img = self._bridge.imgmsg_to_cv2(rs_msg, desired_encoding='bgr8')
-            cv2.imwrite(str(debug_dir/f"rs_rgb.jpg"), rs_img)
+                m = debug_mask
+            # overlay mask onto gray background
+            colored = cv2.applyColorMap(m, cv2.COLORMAP_HOT)
+            cv2.imwrite(str(debug_dir / "debug_mask.jpg"), colored)
 
     def synced_obs_callback(self, pose_msg, rgb_msg, depth_msg, gripper_msg):
         """Process synchronized observations and generate point cloud."""
@@ -261,14 +265,14 @@ class PolicyNode3D(Node):
             masks_dict, _ = self.gsam.propagate_masks_weighted(rgb_img)
 
         # ─── 5 (optional) visual debug storage ─────────────────────────────────
-        debug_mask = self.gsam.fuse_masks(masks_dict)
-        self.save_data(rgb_img, depth_img, debug_mask, boxes_np)
+        # debug_mask = self.gsam.fuse_masks(masks_dict)
+        # self.save_data(rgb_img, depth_img, debug_mask, boxes_np)
 
         # ─── 6 build the weighted scene point-cloud ────────────────────────────
         pcd_np = self.gsam.weighted_pcd(rgb_img, depth_img, masks_dict, self.gsam.cfg["pts_per_pcd"])
 
         # ─── 7 buffer, visualise, ship to inference ────────────────────────────
-        self.pcd_buffer.append((pcd_np, time.monotonic()))
+        self.pcd_buffer.append((pcd_np, time.monotonic() - self.start_time))
         if len(self.pcd_buffer) > self.observation_horizon:
             self.pcd_buffer.pop(0)
 
@@ -302,14 +306,8 @@ class PolicyNode3D(Node):
                 "pose": pose_tensor,
                 "d3fields": pcd_tensor,
                 "pose_timestamps": pose_timestamps,
-                "pcd_timestamps": pcd_timestamps,
-                "update_time": time.monotonic() # Add current time when observation is updated
+                "pcd_timestamps": pcd_timestamps
             }
-            
-            # # Log timestamps for debugging
-            # self.get_logger().info(f"Observation updated at: {obs_dict['update_time']:.3f}")
-            # self.get_logger().info(f"Pose timestamps: {', '.join([f'{ts:.3f}' for ts in pose_timestamps])}")
-            # self.get_logger().info(f"PCD timestamps: {', '.join([f'{ts:.3f}' for ts in pcd_timestamps])}")
             
             # Update shared observation
             self.shared_obs["obs"] = obs_dict
@@ -323,10 +321,11 @@ class PolicyNode3D(Node):
             self.pending_actions.append(self.action_queue.get())
 
         if not self.pending_actions:
+            self.shared_obs["exec_done"] = True
             return                         
 
         # Publish the oldest action
-        action, t_queued = self.pending_actions.pop(0)
+        action = self.pending_actions.pop(0)
 
         # Create action messages
         ee_pos, ee_rot6d, grip = action[:3], action[3:9], action[9]
@@ -346,6 +345,7 @@ class PolicyNode3D(Node):
         grip_msg.data = float(grip)
 
         if not self.paused:
+            self.get_logger().info(f"Publishing action: Position = {ee_pos.round(4)} | Gripper = {grip:.4f} | Timestamp = {time.monotonic() - self.start_time}")
             self.pub_robot_pose.publish(ee_msg)
             self.gripper_pub.publish(grip_msg)
 
@@ -358,25 +358,16 @@ class PolicyNode3D(Node):
         
         # Convert to 6D rotation representation
         robot_ori_tensor = torch.tensor(robot_ori, dtype=torch.float32)
-        robot_ori_6d = self.tf.inverse(robot_ori_tensor) 
-        
-        # Log formatted pose message
-        formatted_pose = f"Observed Pose: x={robot_pos[0]:.3f}, y={robot_pos[1]:.3f}, z={robot_pos[2]:.3f}, " \
-                        f"qx={robot_ori[1]:.3f}, qy={robot_ori[2]:.3f}, qz={robot_ori[3]:.3f}, qw={robot_ori[0]:.3f}"
-        # self.get_logger().info(f"{formatted_pose}")
+        robot_ori_6d = self.tf.inverse(robot_ori_tensor)
 
         # Combine position, orientation
-        if self.gripper_state is not None:
-            robot_pose = np.concatenate([robot_pos, robot_ori_6d.numpy(), self.gripper_state], axis=None)
-            pose_obs_tuple = (robot_pose, time.monotonic())
-            self.pose_buffer.append(pose_obs_tuple)
-            if len(self.pose_buffer) > self.observation_horizon:
-                self.pose_buffer.pop(0)
-        else:
-            self.get_logger().warning("Gripper state is None; skipping this frame.")
+        robot_pose = np.concatenate([robot_pos, robot_ori_6d.numpy(), self.gripper_state], axis=None)
+        self.pose_buffer.append((robot_pose, time.monotonic() - self.start_time))
+        if len(self.pose_buffer) > self.observation_horizon:
+            self.pose_buffer.pop(0)
 
 
-def inference_loop(shared_obs, action_queue, model_path, action_horizon = 4, device = "cuda"):
+def inference_loop(shared_obs, action_queue, model_path, action_horizon = 4, device = "cuda", start_time = 0):
 
     model = load_diffusion_policy(model_path)
     print("Inference process started.")
@@ -385,10 +376,8 @@ def inference_loop(shared_obs, action_queue, model_path, action_horizon = 4, dev
     while shared_obs.get("obs") is None:
         time.sleep(0.05)
 
-    init = shared_obs["obs"]
-    prev_pose_ts = init["pose_timestamps"].copy()
-    prev_zed_ts  = init["zed_rgb_timestamps"].copy()
-    prev_rs_ts   = init["rs_rgb_timestamps"].copy()
+    prev_pose_latest = shared_obs["obs"]["pose_timestamps"][-1]
+    prev_pcd_latest  = shared_obs["obs"]["pcd_timestamps"][-1]
 
     while True:
         # If user paused with the keyboard, spin-wait cheaply
@@ -399,16 +388,16 @@ def inference_loop(shared_obs, action_queue, model_path, action_horizon = 4, dev
         # Busy‐wait until *all* timestamps have advanced
         while True:
             obs_now = shared_obs["obs"]
-            if (np.all(obs_now["pose_timestamps"]  > prev_pose_ts) and
-                np.all(obs_now["zed_rgb_timestamps"] > prev_zed_ts)  and
-                np.all(obs_now["rs_rgb_timestamps"]  > prev_rs_ts)):
+            pose_new = np.min(obs_now["pose_timestamps"]) > prev_pose_latest
+            pcd_new = np.min(obs_now["pcd_timestamps"]) > prev_pcd_latest
+
+            if pose_new and pcd_new and shared_obs["exec_done"]:
                 break
             time.sleep(0.001)
 
         # Save the new arrays
-        prev_pose_ts = obs_now["pose_timestamps"].copy()
-        prev_zed_ts = obs_now["zed_rgb_timestamps"].copy()
-        prev_rs_ts = obs_now["rs_rgb_timestamps"].copy()
+        prev_pose_latest = obs_now["pose_timestamps"][-1]
+        prev_pcd_latest = obs_now["pcd_timestamps"][-1]
 
         obs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in obs_now.items()}          
 
@@ -421,10 +410,17 @@ def inference_loop(shared_obs, action_queue, model_path, action_horizon = 4, dev
 
         q_actions = actions[:action_horizon]          # shape (action_horizon, 10)
 
+        # Print observation
+        detailed_debug_summary(obs, q_actions, start_time)
+
         # Fill the queue
-        now = time.monotonic
         for act in q_actions:
-            action_queue.put((act, now()))
+            action_queue.put(act)
+
+        shared_obs["exec_done"] = False
+
+        # Sleep to allow for execution latency
+        time.sleep(0.75)
 
 def load_diffusion_policy(model_path):
     """Load diffusion policy model from checkpoint"""
@@ -500,17 +496,11 @@ def detailed_debug_summary(obs, actions, start_time, *, max_channels=6):
             pos, rot6d, grip = pose[:3], pose[3:9], pose[9]
             print(f"Pose {ind + 1}: Position = {pos.round(4)} | Gripper = {grip:.4f} | Timestamp = {pose_timestamp}")
 
-    if "zed_color_images" in obs and isinstance(obs["zed_color_images"], torch.Tensor):
+    if "d3fields" in obs and isinstance(obs["d3fields"], torch.Tensor):
         print()
-        for ind, curr_obs in enumerate(obs["zed_color_images"][0]):
-            zed_rgb_timestamp = obs["zed_rgb_timestamps"][ind]
-            print(f"Zed RGB Image {ind + 1}: Shape = {curr_obs.shape} | Timestamp = {zed_rgb_timestamp}")
-
-    if "rs_color_images" in obs and isinstance(obs["rs_color_images"], torch.Tensor):
-        print()
-        for ind, curr_obs in enumerate(obs["rs_color_images"][0]):
-            rs_rgb_timestamp = obs["rs_rgb_timestamps"][ind]
-            print(f"RealSense RGB Image {ind + 1}: Shape = {curr_obs.shape} | Timestamp = {rs_rgb_timestamp}")
+        for ind, curr_obs in enumerate(obs["d3fields"][0]):
+            pcd_timestamp = obs["pcd_timestamps"][ind]
+            print(f"Point Cloud {ind + 1}: Shape = {curr_obs.shape} | Timestamp = {pcd_timestamp}")
 
     if actions is not None:
         print(f"\nActions to be published\n{'-'*80}")
@@ -530,14 +520,13 @@ def main(args=None):
     
     # Create shared memory structures
     manager = Manager()
-    shared_obs = manager.dict(obs=None, paused=False)
+    shared_obs = manager.dict(obs=None, paused=False, exec_done=True)
     action_queue = Queue()
-    pending_counter = manager.Value('i', 0)
-    lock = manager.Lock()
 
     # Model path
     model_path = '/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/models/2048_pts_more_fruit_pts.ckpt'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    start_time = time.monotonic()
 
     # Load GSAM configuration
     gsam_config = default_gsam_config()
@@ -545,13 +534,13 @@ def main(args=None):
     # Start inference process
     inference_process = Process(
         target=inference_loop, 
-        args=(shared_obs, action_queue, pending_counter, lock, model_path, 2, device)
+        args=(shared_obs, action_queue, model_path, 2, device, start_time)
     )
     inference_process.daemon = True
     inference_process.start()
 
     # Create ROS node
-    node = PolicyNode3D(shared_obs, action_queue, pending_counter, lock, gsam_config)
+    node = PolicyNode3D(shared_obs, action_queue, gsam_config, start_time)
 
     # Start key monitoring thread
     key_thread = threading.Thread(target=monitor_keys, args=(node,), daemon=True)
