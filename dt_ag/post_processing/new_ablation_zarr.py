@@ -3,12 +3,8 @@
 Zarr dataset filter and resize script.
 
 This script copies data from an existing Zarr dataset and creates a new
-filtered dataset containing only:
-- rs_rgb (with optional resizing)
-- agent_pos  
-- action
+filtered dataset containing only desired data.
 
-All ZED camera data and depth information is excluded.
 """
 
 # ────────────────────────────────────────────────────────────────
@@ -35,8 +31,15 @@ OUTPUT_ZARR_DIR = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/3d_s
 
 # Resize settings
 ENABLE_RESIZE = True  # Set to False to keep original resolution
-TARGET_WIDTH = 640    # Target width for resizing
+TARGET_WIDTH = 480    # Target width for resizing
 TARGET_HEIGHT = 360   # Target height for resizing
+
+# Center crop settings
+ENABLE_CENTER_CROP = True  # Set to False to disable center cropping
+RS_CROP_WIDTH = 850      # Target width for center crop
+RS_CROP_HEIGHT = 420     # Target height for center crop
+ZED_CROP_WIDTH = 1400
+ZED_CROP_HEIGHT = 1200
 
 # Debug mode - set to True to process only first episode
 DEBUGGING = False
@@ -50,28 +53,75 @@ def ensure_dir(p: Path) -> None:
     """Create directory if it doesn't exist."""
     p.mkdir(parents=True, exist_ok=True)
 
-def resize_rgb_frames(rgb_frames: np.ndarray, target_size: Tuple[int, int]) -> np.ndarray:
+def resize_rgb_frames(rgb_frames: np.ndarray, target_size: Tuple[int,int]) -> np.ndarray:
     """
-    Resize RGB frames to target size.
-    
-    Args:
-        rgb_frames: Array of shape (T, H, W, C)
-        target_size: (width, height) tuple
-        
-    Returns:
-        Resized frames array of shape (T, target_height, target_width, C)
+    Resize RGB frames to target size, returning (T, C, H, W).
+
+    Accepts either:
+      - HWC: (T, H, W, C)
+      - CHW: (T, C, H, W)
     """
-    T, H, W, C = rgb_frames.shape
-    target_width, target_height = target_size
-    
-    resized_frames = np.zeros((T, target_height, target_width, C), dtype=rgb_frames.dtype)
-    
+    target_w, target_h = target_size
+
+    # Step 1: get everything into HWC-per-frame
+    if rgb_frames.ndim == 4 and rgb_frames.shape[-1] in (1,3):
+        # already (T, H, W, C)
+        hwc = rgb_frames
+    elif rgb_frames.ndim == 4 and rgb_frames.shape[1] in (1,3):
+        # currently (T, C, H, W) → transpose
+        hwc = rgb_frames.transpose(0,2,3,1)  # → (T, H, W, C)
+    else:
+        raise ValueError(f"Expected (T,H,W,C) or (T,C,H,W), got {rgb_frames.shape}")
+
+    T, H, W, C = hwc.shape
+    out_hwc = np.zeros((T, target_h, target_w, C), dtype=hwc.dtype)
+
+    # Step 2: resize each frame in HWC format
     for t in range(T):
-        # OpenCV resize expects (width, height)
-        resized_frame = cv2.resize(rgb_frames[t], (target_width, target_height), interpolation=cv2.INTER_LINEAR)
-        resized_frames[t] = resized_frame
+        out_hwc[t] = cv2.resize(hwc[t],
+                                (target_w, target_h),
+                                interpolation=cv2.INTER_LINEAR)
+
+    # Step 3: convert back to CHW-per-frame
+    return out_hwc.transpose(0, 3, 1, 2)    # → (T, C, H, W)
+
+def center_crop_rgb_frames(rgb_frames: np.ndarray, crop_size: Tuple[int,int]) -> np.ndarray:
+    """
+    Center crop RGB frames to target size, returning (T, C, H, W).
+
+    Accepts either:
+      - HWC: (T, H, W, C)
+      - CHW: (T, C, H, W)
+    """
+    crop_w, crop_h = crop_size
+
+    # Step 1: get everything into HWC-per-frame
+    if rgb_frames.ndim == 4 and rgb_frames.shape[-1] in (1,3):
+        # already (T, H, W, C)
+        hwc = rgb_frames
+    elif rgb_frames.ndim == 4 and rgb_frames.shape[1] in (1,3):
+        # currently (T, C, H, W) → transpose
+        hwc = rgb_frames.transpose(0,2,3,1)  # → (T, H, W, C)
+    else:
+        raise ValueError(f"Expected (T,H,W,C) or (T,C,H,W), got {rgb_frames.shape}")
+
+    T, H, W, C = hwc.shape
     
-    return resized_frames
+    # Check if crop size is valid
+    if crop_h > H or crop_w > W:
+        raise ValueError(f"Crop size ({crop_h}, {crop_w}) larger than image size ({H}, {W})")
+    
+    # Calculate center crop coordinates
+    start_y = (H - crop_h) // 2
+    start_x = (W - crop_w) // 2
+    end_y = start_y + crop_h
+    end_x = start_x + crop_w
+    
+    # Step 2: crop each frame
+    cropped_hwc = hwc[:, start_y:end_y, start_x:end_x, :]
+    
+    # Step 3: convert back to CHW-per-frame
+    return cropped_hwc.transpose(0, 3, 1, 2)    # → (T, C, H, W)
 
 def get_episode_names(zarr_root) -> list:
     """Get sorted list of episode names from Zarr root."""
@@ -80,7 +130,7 @@ def get_episode_names(zarr_root) -> list:
 
 def check_required_arrays(episode_group, episode_name: str) -> bool:
     """Check if episode has all required arrays."""
-    required_arrays = ["rs_rgb", "agent_pos", "action"]
+    required_arrays = ["rs_color_images", "pose", "action"]
     
     for array_name in required_arrays:
         if array_name not in episode_group:
@@ -141,24 +191,33 @@ def main() -> None:
                 continue
             
             # Load required data
-            rs_rgb = input_episode["rs_rgb"][:]
-            agent_pos = input_episode["agent_pos"][:]
+            rs_rgb = input_episode["rs_color_images"][:]
+            zed_rgb = input_episode["zed_color_images"][:]
+            pose = input_episode["pose"][:]
             action = input_episode["action"][:]
             
             # Get episode length
             T = rs_rgb.shape[0]
-            
+
+            # Apply center crop if enabled
+            if ENABLE_CENTER_CROP:
+                CONSOLE.log(f"[blue]Center cropping RGB frames from {rs_rgb.shape[1:3]} to ({RS_CROP_HEIGHT}, {RS_CROP_WIDTH})")
+                rs_rgb = center_crop_rgb_frames(rs_rgb, (RS_CROP_WIDTH, RS_CROP_HEIGHT))
+                zed_rgb = center_crop_rgb_frames(zed_rgb, (ZED_CROP_WIDTH, ZED_CROP_HEIGHT))
+
             # Resize RGB frames if enabled
             if ENABLE_RESIZE:
                 CONSOLE.log(f"[blue]Resizing RGB frames from {rs_rgb.shape[1:3]} to ({TARGET_HEIGHT}, {TARGET_WIDTH})")
                 rs_rgb = resize_rgb_frames(rs_rgb, (TARGET_WIDTH, TARGET_HEIGHT))
-            
+                zed_rgb = resize_rgb_frames(zed_rgb, (TARGET_WIDTH, TARGET_HEIGHT))
+
             # Create output episode group
             output_episode = output_root.create_group(episode_name)
             
             # Store filtered data
-            output_episode.array("rs_rgb", rs_rgb, dtype=np.uint8, chunks=(1, *rs_rgb.shape[1:]))
-            output_episode.array("agent_pos", agent_pos, dtype=np.float32)
+            output_episode.array("rs_color_images", rs_rgb, dtype=np.uint8, chunks=(1, *rs_rgb.shape[1:]))
+            output_episode.array("zed_color_images", zed_rgb, dtype=np.uint8, chunks=(1, *zed_rgb.shape[1:]))
+            output_episode.array("pose", pose, dtype=np.float32)
             output_episode.array("action", action, dtype=np.float32)
             
             # Copy episode attributes
@@ -187,9 +246,16 @@ def main() -> None:
     CONSOLE.log(f"[green]Processing complete!")
     CONSOLE.log(f"[green]Successfully processed: {successful_episodes}/{len(episode_names)} episodes")
     CONSOLE.log(f"[green]Output dataset saved to: {OUTPUT_ZARR_DIR}")
-    
+
+    # Log transformations applied
+    transformations = []
+    if ENABLE_CENTER_CROP:
+        transformations.append(f"Center cropped to: {RS_CROP_HEIGHT}x{RS_CROP_WIDTH}")
     if ENABLE_RESIZE:
-        CONSOLE.log(f"[green]RGB frames resized to: {TARGET_HEIGHT}x{TARGET_WIDTH}")
+        transformations.append(f"Resized to: {TARGET_HEIGHT}x{TARGET_WIDTH}")
+    
+    if transformations:
+        CONSOLE.log(f"[green]Transformations applied: {', '.join(transformations)}")
     else:
         CONSOLE.log(f"[green]RGB frames kept at original resolution")
     
@@ -198,8 +264,9 @@ def main() -> None:
         sample_episode = output_root[episode_names[0]]
         CONSOLE.log(f"[cyan]Dataset info:")
         CONSOLE.log(f"[cyan]  - Episodes: {successful_episodes}")
-        CONSOLE.log(f"[cyan]  - RS RGB shape: {sample_episode['rs_rgb'].shape}")
-        CONSOLE.log(f"[cyan]  - Agent pos shape: {sample_episode['agent_pos'].shape}")
+        CONSOLE.log(f"[cyan]  - RS RGB shape: {sample_episode['rs_color_images'].shape}")
+        CONSOLE.log(f"[cyan]  - ZED RGB shape: {sample_episode['zed_color_images'].shape}")
+        CONSOLE.log(f"[cyan]  - Pose shape: {sample_episode['pose'].shape}")
         CONSOLE.log(f"[cyan]  - Action shape: {sample_episode['action'].shape}")
 
 # ────────────────────────────────────────────────────────────────

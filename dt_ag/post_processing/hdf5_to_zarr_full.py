@@ -38,9 +38,12 @@ from rich.console import Console
 from tqdm import tqdm
 
 from inference.custom_gsam_utils_v2 import GroundedSAM2 as GSamUtil, default_gsam_config
+from rotation_transformer import RotationTransformer
 
 DEBUGGING = False  # if True: only process episode_0000
+USE_GSAM = False
 CONSOLE = Console()
+rotation_transformer = RotationTransformer(from_rep='quaternion', to_rep='rotation_6d')
 
 # ────────────────────────────────────────────────────────────────
 #  Helper functions
@@ -83,7 +86,10 @@ def check_episode_complete(zarr_group, episode_name: str) -> bool:
         return False
     
     ep_group = zarr_group[episode_name]
-    required_arrays = ["rs_rgb", "rs_depth", "zed_rgb", "zed_depth", "zed_pcd", "agent_pos", "action"]
+    if USE_GSAM:
+        required_arrays = ["rs_rgb", "rs_depth", "zed_rgb", "zed_depth", "zed_pcd", "pose", "action"]
+    else:
+        required_arrays = ["rs_rgb", "rs_depth", "zed_rgb", "zed_depth", "pose", "action"]
     
     for array_name in required_arrays:
         if array_name not in ep_group:
@@ -93,6 +99,11 @@ def check_episode_complete(zarr_group, episode_name: str) -> bool:
     # Check if the episode has the expected length attribute
     if "length" not in ep_group.attrs:
         CONSOLE.log(f"[yellow]Episode {episode_name} missing length attribute, will reprocess")
+        return False
+    
+    # Check if pose has the expected 10D shape (9D pose + 1D gripper)
+    if ep_group["pose"].shape[1] != 10:
+        CONSOLE.log(f"[yellow]Episode {episode_name} has {ep_group['pose'].shape[1]}D pose instead of 10D, will reprocess")
         return False
     
     return True
@@ -117,6 +128,32 @@ def get_processed_episodes(zarr_dir: Path) -> set:
         CONSOLE.log(f"[yellow]Could not read existing Zarr file: {e}")
     
     return processed
+
+def combine_pose_gripper(pose: np.ndarray, gripper: np.ndarray) -> np.ndarray:
+    """    
+    Args:
+        pose: (T, 7) array with [x, y, z, qw, qx, qy, qz]
+        gripper: (T,) array with gripper positions
+    
+    Returns:
+        (T, 10) array with [x, y, z, rot6d_0, rot6d_1, rot6d_2, rot6d_3, rot6d_4, rot6d_5, gripper]
+    """
+    # Ensure gripper is 2D for concatenation
+    if gripper.ndim == 1:
+        gripper = gripper.reshape(-1, 1)
+    
+    # Extract xyz and quaternion (wxyz format)
+    xyz = pose[:, :3]  # (T, 3)
+    quat_wxyz = pose[:, 3:]  # (T, 4) - [qw, qx, qy, qz]
+    
+    # Convert quaternion to 6D rotation using rotation transformer
+    rot6d = rotation_transformer.forward(quat_wxyz)  # (T, 6)
+    
+    # Concatenate: xyz + 6D rotation + gripper
+    pose_10d = np.concatenate([xyz, rot6d, gripper], axis=1)  # (T, 10)
+    
+    CONSOLE.log(f"[blue]Combined pose shape: xyz {xyz.shape} + rot6d {rot6d.shape} + gripper {gripper.shape} → {pose_10d.shape}")
+    return pose_10d
 
 # ────────────────────────────────────────────────────────────────
 #  GSAM wrapper
@@ -206,7 +243,12 @@ def main() -> None:
     # Check which episodes are already processed
     processed_episodes = get_processed_episodes(ZARR_DIR)
     
-    gsam = GSAM2()
+    gsam = None
+    if USE_GSAM:
+        gsam = GSAM2()
+        CONSOLE.log("[blue]GroundedSAM2 processing enabled")
+    else:
+        CONSOLE.log("[yellow]GroundedSAM2 processing disabled - skipping mask and point cloud generation")
     
     # Open Zarr in append mode to add new episodes
     root = zarr.open(ZARR_DIR, mode="a")
@@ -243,14 +285,28 @@ def main() -> None:
         zed_rgb = data["zed_color_images"]
         zed_depth= data["zed_depth_images"]
 
+        # ―― combine pose + gripper into 8D pose ――――――――――――――――
+        pose_7d = data["pose"]  # (T, 7)
+        gripper = data["gripper"]  # (T,)
+        pose_10d = combine_pose_gripper(pose_7d, gripper)  # (T, 10)
+        
+        # ―― compute 8D action (last_pose + gripper difference) ―――――
+        last_pose_7d = data["last_pose"]  # (T, 7)
+        last_gripper = data["gripper"]  # (T,)
+        action_10d = combine_pose_gripper(last_pose_7d, last_gripper)  # (T, 10)
+
         # episode-specific extras directory
         ep_dir = DEBUG_DIR / episode_name
         mask_dir = ep_dir / "masks"
 
         try:
-            # ―― GSAM → masks → point clouds ―――――――――――――――――――――
-            pcds = gsam.process_episode(zed_rgb, zed_depth, mask_dump_dir=mask_dir)
-            pcds_arr = np.stack(pcds, axis=0)  # (T, K, 6)
+
+            if USE_GSAM:
+                # ―― GSAM → masks → point clouds ―――――――――――――――――――――
+                pcds = gsam.process_episode(zed_rgb, zed_depth, mask_dump_dir=mask_dir)
+                pcds_arr = np.stack(pcds, axis=0)  # (T, K, 6)
+            else:
+                pcds_arr = None
 
             # ―― save first / last frames ――――――――――――――――――――――
             dump_first_last_frames(rs_rgb, rs_depth, zed_rgb, zed_depth, ep_dir)
@@ -261,19 +317,24 @@ def main() -> None:
                 del root[episode_name]
             
             grp = root.create_group(episode_name)
-            grp.array("rs_rgb",    rs_rgb,    dtype=np.uint8,  chunks=(1, *rs_rgb.shape[1:]))
-            grp.array("rs_depth",  rs_depth,  dtype=np.float32,chunks=(1, *rs_depth.shape[1:]))
-            grp.array("zed_rgb",   zed_rgb,   dtype=np.uint8,  chunks=(1, *zed_rgb.shape[1:]))
-            grp.array("zed_depth", zed_depth, dtype=np.float32,chunks=(1, *zed_depth.shape[1:]))
-            grp.array("zed_pcd",   pcds_arr,  dtype=np.float32,chunks=(1, *pcds_arr.shape[1:]))
-            grp.array("agent_pos", data["pose"],               dtype=np.float32)
-            grp.array("action",    data["last_pose"] - data["pose"], dtype=np.float32)
-            grp.attrs["length"] = T
+            grp.array("rs_color_images",    rs_rgb,    dtype=np.uint8,  chunks=(1, *rs_rgb.shape[1:]))
+            grp.array("rs_depth_images",  rs_depth,  dtype=np.float32,chunks=(1, *rs_depth.shape[1:]))
+            grp.array("zed_color_images",   zed_rgb,   dtype=np.uint8,  chunks=(1, *zed_rgb.shape[1:]))
+            grp.array("zed_depth_images", zed_depth, dtype=np.float32,chunks=(1, *zed_depth.shape[1:]))
 
-            CONSOLE.log(f"[green]✓ Completed {episode_name}")
+            if USE_GSAM and pcds_arr is not None:
+                grp.array("zed_pcd", pcds_arr, dtype=np.float32, chunks=(1, *pcds_arr.shape[1:]))
+
+            grp.array("pose",      pose_10d,   dtype=np.float32)  # Now 10D: [x,y,z,6d_pose,gripper]
+            grp.array("action",    action_10d, dtype=np.float32)  # Now 10D: action difference
+            grp.attrs["length"] = T
+            grp.attrs["pose_format"] = "x,y,z,6d_pose,gripper"  # Document the format
+
+            CONSOLE.log(f"[green]✓ Completed {episode_name} with 10D pose (7D + 6D + gripper)")
             
             # Reset GSAM state for next episode to avoid memory issues
-            gsam.util.reset()
+            if USE_GSAM and gsam is not None:
+                gsam.util.reset()
             
         except Exception as e:
             CONSOLE.log(f"[red]Error processing {episode_name}: {e}")
@@ -287,6 +348,7 @@ def main() -> None:
     CONSOLE.log(f"[green]Finished.[/] Processed {processed_count} new episodes")
     CONSOLE.log(f"[green]Total episodes in Zarr: {len(root.keys())}/{total_count}")
     CONSOLE.log(f"[green]Extra masks & frames saved under {DEBUG_DIR}")
+    CONSOLE.log(f"[blue]NOTE: Pose is now 10D format: [x, y, z, 6d_pose, gripper]")
 
 # ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":

@@ -77,7 +77,7 @@ class PolicyNode3D(Node):
         # Shared data and action queue
         self.shared_obs = shared_obs
         self.action_queue = action_queue
-        self.dt = 0.1  
+        self.dt = 0.05  
         
         # Timers
         self.create_timer(self.dt, self.timer_callback)
@@ -240,6 +240,7 @@ class PolicyNode3D(Node):
         else:
             self.shared_obs["exec_done"] = False
 
+        # Publish the oldest action
         while self.pending_actions:
             action = self.pending_actions.pop(0)
 
@@ -519,7 +520,7 @@ def main(args=None):
     start_time = time.monotonic()
 
     # Model path
-    model_path = '/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/models/two_cameras_policy.ckpt'
+    model_path = '/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/models/new_setup_two_cam.ckpt'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     shape_meta = load_shape_meta(model_path)
 

@@ -26,8 +26,8 @@ class XArmDataCollection(Node):
         # Subscribers for robot and cameras
         self.pose_sub = Subscriber(self, PoseStamped, 'robot_position_action')
         self.gripper_sub = Subscriber(self, Float32, 'gripper_position')
-        self.rs_color_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
-        self.rs_depth_sub = Subscriber(self, Image, '/camera/camera/depth/image_rect_raw')
+        self.rs_color_sub = Subscriber(self, Image, '/camera/realsense_camera/color/image_raw')
+        self.rs_depth_sub = Subscriber(self, Image, '/camera/realsense_camera/depth/image_raw')
         self.zed_color_sub = Subscriber(self, Image, 'zed_image/rgb')
         self.zed_depth_sub = Subscriber(self, Image, 'zed_image/depth')
 
@@ -135,6 +135,7 @@ class XArmDataCollection(Node):
 
         # ZED color
         zed_np = self.parse_color_image(zed_color_msg)
+        self.get_logger().info(f"Zed RGB Image Shape: {zed_np.shape}")
         self.zed_color_frames.append(zed_np)
 
         # ZED depth

@@ -17,14 +17,14 @@ class ZedImagePublisher(Node):
 
         self.bridge = CvBridge()
         # Timer for grabbing and publishing images
-        self.timer = self.create_timer(0.05, self.timer_callback)
+        self.timer = self.create_timer(1/30.0, self.timer_callback)
 
         # ==========================================================
         # (A) Initialize the ZED camera with provided settings
         # ==========================================================
         self.zed_cam = sl.Camera()
         init_params = sl.InitParameters()
-        init_params.camera_resolution = sl.RESOLUTION.HD2K
+        init_params.camera_resolution = sl.RESOLUTION.HD720
         init_params.depth_mode = sl.DEPTH_MODE.NEURAL
         init_params.coordinate_units = sl.UNIT.METER
         init_params.depth_stabilization = 1
@@ -72,7 +72,7 @@ class ZedImagePublisher(Node):
         self.zed_left_image = sl.Mat()
         self.zed_depth_map = sl.Mat()
         # Define the desired resolution for retrieval
-        self.desired_res = sl.Resolution(2208, 1242) # HD2K resolution
+        self.desired_res = sl.Resolution(1280, 720) # 1280x720 resolution
 
     def timer_callback(self):
         # Grab a new frame from the ZED camera

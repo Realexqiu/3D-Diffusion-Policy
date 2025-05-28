@@ -13,9 +13,7 @@ from diffusion_policy.dataset.base_dataset import BaseImageDataset
 class XArmImageDataset2D(BaseImageDataset):
     """
     Dataset for *2-D* Diffusion Policy on your xArm recordings.
-    Each observation = RealSense RGB frame + 7-D agent_pos.
-
-    Bypasses ReplayBuffer and reads directly from a filtered Zarr.
+    Each observation = RealSense RGB frame + 8-D pose.
     """
 
     def __init__(
@@ -52,8 +50,9 @@ class XArmImageDataset2D(BaseImageDataset):
         self.index: List[Tuple[str,int]] = []
         for epi in self.train_eps:
             grp = self.root[epi]
-            T = grp["rs_rgb"].shape[0]
-            for t in range(T - horizon):
+            T = grp["rs_color_images"].shape[0]
+            T_zed = grp["zed_color_images"].shape[0]
+            for t in range(min(T, T_zed) - horizon):
                 self.index.append((epi, t))
 
     def get_validation_dataset(self) -> "XArmImageDataset2D":
@@ -62,8 +61,9 @@ class XArmImageDataset2D(BaseImageDataset):
         val_ds.index = []
         for epi in self.val_eps:
             grp = val_ds.root[epi]
-            T = grp["rs_rgb"].shape[0]
-            for t in range(T - val_ds.horizon):
+            T = grp["rs_color_images"].shape[0]
+            T_zed = grp["zed_color_images"].shape[0]
+            for t in range(min(T, T_zed) - val_ds.horizon):
                 val_ds.index.append((epi, t))
         return val_ds
 
@@ -75,16 +75,26 @@ class XArmImageDataset2D(BaseImageDataset):
         grp = self.root[epi]
         sl = slice(t0, t0 + self.horizon)
         # Load RGB frames
-        rgb = grp["rs_rgb"][sl]        # (H, h, w, 3)
+        rs_rgb = grp["rs_color_images"][sl]        # (H, h, w, 3)
+        zed_rgb = grp["zed_color_images"][sl]        # (H, h, w, 3)
         # Agent positions and actions
-        agent_pos = grp["agent_pos"][sl]  # (H, 7)
-        action = grp["action"][sl]        # (H, 7)
-        # Preprocess image: uint8 -> float32 [0,1], channel-first
-        img = np.moveaxis(rgb, -1, 1).astype(np.float32) / 255.0
+        pose = grp["pose"][sl]  # (H, 8)
+        action = grp["action"][sl]        # (H, 8)
+        # If your Zarr stores HWC, move channels to front; if it already stores CHW, do nothing.
+        if rs_rgb.ndim == 4 and rs_rgb.shape[-1] == 3:
+            # (T, H, W, C) -> (T, C, H, W)
+            rs_img = np.moveaxis(rs_rgb, -1, 1)
+            zed_img = np.moveaxis(zed_rgb, -1, 1)
+        else:
+            # assume already (T, C, H, W)
+            rs_img = rs_rgb
+            zed_img = zed_rgb
+        rs_img = rs_img.astype(np.float32) / 255.0
         sample = {
             "obs": {
-                "image": img,
-                "agent_pos": agent_pos.astype(np.float32),
+                "rs_color_images": rs_img,
+                "zed_color_images": zed_img,
+                "pose": pose.astype(np.float32),
             },
             "action": action.astype(np.float32),
         }
@@ -96,13 +106,14 @@ class XArmImageDataset2D(BaseImageDataset):
         acts = []
         for epi in self.train_eps:
             grp = self.root[epi]
-            poses.append(grp["agent_pos"][...])
+            poses.append(grp["pose"][...])
             acts.append(grp["action"][...])
         poses = np.concatenate(poses, axis=0)
         acts = np.concatenate(acts, axis=0)
-        data = {"agent_pos": poses, "action": acts}
+        data = {"pose": poses, "action": acts}
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
         # Identity for image range
-        normalizer["image"] = get_image_range_normalizer()
+        normalizer["rs_color_images"] = get_image_range_normalizer()
+        normalizer["zed_color_images"] = get_image_range_normalizer()
         return normalizer

@@ -54,7 +54,7 @@ class CombinedXArmNode(Node):
         self.gripper_state_pub = self.create_publisher(Float32, 'gripper_state', 10)
 
         # Timers
-        self.state_timer = self.create_timer(1.0 / 20.0, self.state_timer_callback)
+        self.state_timer = self.create_timer(1.0 / 30.0, self.state_timer_callback)
 
         # Reset and gripper open
         self.arm.set_gripper_mode(0)      # location mode
@@ -169,7 +169,7 @@ class CombinedXArmNode(Node):
             
             # Reset position (in mm and degrees)
             self.arm.set_position(
-                x=166.8, y=1.8, z=179.3, 
+                x=166.9, y=1.9, z=230.8, 
                 roll=179.1, pitch=0, yaw=1.2, 
                 speed=100, is_radian=False, wait=True
             )

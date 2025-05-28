@@ -6,6 +6,18 @@ Enhanced Policy Node with Point Cloud Generation
 This script combines the 3D diffusion policy inference with
 Grounded SAM-2 for point cloud generation from RGB-D images.
 """
+import sys, pathlib, os
+
+# inference script location: ~/Documents/3D-Diffusion-Policy/dt_ag/inference
+# go up two levels to ~/Documents/3D-Diffusion-Policy, then into the '3D-Diffusion-Policy' subfolder
+LOCAL_ROOT = pathlib.Path(__file__).resolve().parents[2] / "3D-Diffusion-Policy"
+assert LOCAL_ROOT.is_dir(), f"Can't find code at {LOCAL_ROOT}"
+sys.path.insert(0, str(LOCAL_ROOT))
+os.chdir(str(LOCAL_ROOT))
+
+# now imports will pick up your current repo
+import diffusion_policy
+print("Loading diffusion_policy from:", diffusion_policy.__file__)
 
 import sys
 import rclpy
@@ -15,6 +27,7 @@ from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Float32, Bool
 import threading
 import pathlib
+from typing import Tuple
 # import pygame
 import numpy as np
 import torch
@@ -32,12 +45,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 import message_filters
 
-gendp_path = '/home/alex/Documents/DT-Diffusion-Policy/gendp/gendp'
-
-if gendp_path not in sys.path:
-    sys.path.append(gendp_path)
-
-from gendp.model.common.rotation_transformer import RotationTransformer
+from rotation_transformer import RotationTransformer
 
 
 class PolicyNode3D(Node):
@@ -56,9 +64,9 @@ class PolicyNode3D(Node):
         self.gripper_sub = message_filters.Subscriber(self, Float32, '/gripper_state', qos_profile=sensor_qos)
 
         self.sync = message_filters.ApproximateTimeSynchronizer(
-            [self.pose_sub, self.zed_rgb_sub, self.gripper_sub, self.rs_color_sub], 
+            [self.pose_sub, self.gripper_sub, self.zed_rgb_sub, self.rs_color_sub], 
             queue_size=30,         # how many "unmatched" msgs to keep
-            slop=0.3,           
+            slop=0.1,           
             allow_headerless=True)  # Allow messages without headers
         
         self.sync.registerCallback(self.synced_obs_callback)
@@ -77,7 +85,7 @@ class PolicyNode3D(Node):
         # Shared data and action queue
         self.shared_obs = shared_obs
         self.action_queue = action_queue
-        self.dt = 0.1  
+        self.dt = 0.2  
         
         # Timers
         self.create_timer(self.dt, self.timer_callback)
@@ -99,13 +107,15 @@ class PolicyNode3D(Node):
         self.paused = False
         self.even = True
         self.pending_actions = []
+        self.center_crop = True
+        self.RS_CROP_SIZE = (850, 420) # Width, Height
+        self.ZED_CROP_SIZE = (1400, 1200) # Width, Height
 
         # Jiggle gripper to activate it
         msg = Float32()
         msg.data = 0.05
         self.gripper_pub.publish(msg)
         time.sleep(0.5)
-        msg = Float32()
         msg.data = 0.0
         self.gripper_pub.publish(msg)
         self.gripper_state = 0.0
@@ -116,37 +126,49 @@ class PolicyNode3D(Node):
         self.get_logger().info("2D Diffusion Policy Node for Baseline Gripper Initialized!")
 
     # Create helper method to save images
-    def save_data(self, zed_rgb_msg, rs_msg=None, debug_dir=Path("2d_dp_debug")):
+    def save_data(self, rs_rgb=None, zed_rgb=None, debug_dir=Path("../dt_ag/inference/2d_dp_debug")):
         """Save RGB and depth images for debugging"""
         debug_dir.mkdir(parents=True, exist_ok=True)
 
-        # Check if zed_rgb_msg is a numpy array
-        if isinstance(zed_rgb_msg, np.ndarray):
-            # Convert from CHW float32 normalized to HWC uint8 for OpenCV
-            if zed_rgb_msg.shape[0] == 3:  # CHW format
-                # Denormalize back to 0-255 range, transpose to HWC, and convert to uint8
-                zed_rgb_img = (zed_rgb_msg * 255).astype(np.uint8).transpose(1, 2, 0)
-            else:
-                zed_rgb_img = zed_rgb_msg
-        else:
-            # Convert RGB image
-            zed_rgb_img = self._bridge.imgmsg_to_cv2(zed_rgb_msg, desired_encoding='bgr8')
-        
-        # Save converted images
-        cv2.imwrite(str(debug_dir/f"zed_rgb.jpg"), zed_rgb_img)
-        
-        # Save RealSense image if provided
-        if rs_msg is not None:
-            if isinstance(rs_msg, np.ndarray):
-                # Convert from CHW float32 normalized to HWC uint8 for OpenCV
-                if rs_msg.shape[0] == 3:  # CHW format
+        # Save Zed RGB image if provided
+        if zed_rgb is not None:
+            if isinstance(zed_rgb, np.ndarray):
+                # Check if image is in CHW format (from resize_for_policy)
+                if zed_rgb.shape[0] == 3:  # CHW format with 3 channels
+                    # Convert from CHW float32 normalized to HWC uint8 for OpenCV
                     # Denormalize back to 0-255 range, transpose to HWC, and convert to uint8
-                    rs_img = (rs_msg * 255).astype(np.uint8).transpose(1, 2, 0)
+                    zed_img = (zed_rgb * 255).astype(np.uint8).transpose(1, 2, 0)
+                    # Convert RGB back to BGR for OpenCV
+                    zed_img = cv2.cvtColor(zed_img, cv2.COLOR_RGB2BGR)
                 else:
-                    rs_img = rs_msg
+                    # Assume it's already in HWC format
+                    zed_img = zed_rgb
+                cv2.imwrite(str(debug_dir/f"zed_rgb.jpg"), zed_img)
             else:
-                rs_img = self._bridge.imgmsg_to_cv2(rs_msg, desired_encoding='bgr8')
-            cv2.imwrite(str(debug_dir/f"rs_rgb.jpg"), rs_img)
+                # If it's a ROS message, convert it
+                zed_img = self._bridge.imgmsg_to_cv2(zed_rgb, desired_encoding='bgr8')
+                cv2.imwrite(str(debug_dir/f"zed_rgb.jpg"), zed_img)
+
+        # Save RealSense image if provided
+        if rs_rgb is not None:
+            if isinstance(rs_rgb, np.ndarray):
+                # Check if image is in CHW format (from resize_for_policy)
+                if rs_rgb.shape[0] == 3:  # CHW format with 3 channels
+                    # Convert from CHW float32 normalized to HWC uint8 for OpenCV
+                    # Denormalize back to 0-255 range, transpose to HWC, and convert to uint8
+                    rs_img = (rs_rgb * 255).astype(np.uint8).transpose(1, 2, 0)
+                    # Convert RGB back to BGR for OpenCV
+                    rs_img = cv2.cvtColor(rs_img, cv2.COLOR_RGB2BGR)
+                else:
+                    # Assume it's already in HWC format
+                    rs_img = rs_rgb
+                cv2.imwrite(str(debug_dir/f"rs_rgb.jpg"), rs_img)
+            else:
+                # If it's a ROS message, convert it
+                rs_img = self._bridge.imgmsg_to_cv2(rs_rgb, desired_encoding='bgr8')
+                cv2.imwrite(str(debug_dir/f"rs_rgb.jpg"), rs_img)
+        else:
+            self.get_logger().info("No RealSense image to save.")
 
     def reset_xarm(self):
         """Reset robot to home position"""
@@ -192,7 +214,8 @@ class PolicyNode3D(Node):
 
     def update_observation(self):
         """Consolidate the latest *horizon* observations and push to `shared_obs`."""
-        min_len = min(len(self.pose_buffer), len(self.zed_rgb_buffer), len(self.rs_color_buffer))
+        # min_len = min(len(self.pose_buffer), len(self.zed_rgb_buffer), len(self.rs_color_buffer))
+        min_len = min(len(self.pose_buffer), len(self.rs_color_buffer))
         if min_len < self.observation_horizon:
             return  # not enough data yet
 
@@ -209,12 +232,12 @@ class PolicyNode3D(Node):
         zed_rgb_tensor = torch.from_numpy(zed_rgb_np).unsqueeze(0)          # (1, T, 3, H, W)
 
         # RealSense RGB
-        rs_slice = self.rs_color_buffer[-self.observation_horizon:]
+        rs_slice = self.rs_color_buffer[-self.observation_horizon:] 
         rs_np = np.stack([r[0] for r in rs_slice])             # (T, 3, H, W)
         rs_rgb_tstamps = np.array([r[1] for r in rs_slice])             # (T,)
         rs_rgb_tensor = torch.from_numpy(rs_np).unsqueeze(0)           # (1, T, 3, H, W)
 
-        # self.save_data(zed_rgb_slice[0][0], rs_slice[0][0])
+        self.save_data(rs_slice[0][0], zed_rgb_slice[0][0])
 
         obs_dict = {
             'pose': pose_tensor,
@@ -243,7 +266,6 @@ class PolicyNode3D(Node):
         while self.pending_actions:
             action = self.pending_actions.pop(0)
 
-            # Create pose and gripper messages
             ee_pos, ee_rot6d, grip = action[:3], action[3:9], action[9]
             ee_quat = self.tf.forward(torch.tensor(ee_rot6d))
             ee_msg = PoseStamped()
@@ -256,20 +278,19 @@ class PolicyNode3D(Node):
             ee_msg.pose.orientation.z = float(ee_quat[3])
             ee_msg.pose.orientation.w = float(ee_quat[0])
 
-            # grip_msg = Float32()
-            # grip_msg.data = float(grip)
+            grip_msg = Float32()
+            grip_msg.data = float(grip)
 
             if not self.paused:
                 self.get_logger().info(f"Publishing action: Position = {ee_pos.round(4)} | Gripper = {grip:.4f} | Timestamp = {time.monotonic() - self.start_time}")
                 self.pub_robot_pose.publish(ee_msg)
-                # self.gripper_pub.publish(grip_msg)
+                self.gripper_pub.publish(grip_msg)
 
             time.sleep(0.1)
         
         self.shared_obs["exec_done"] = True
 
-
-    def synced_obs_callback(self, pose_msg, zed_rgb_msg, gripper_msg, rs_msg):
+    def synced_obs_callback(self, pose_msg, gripper_msg, zed_rgb_msg, rs_msg):
         """Process synchronized observations and generate point cloud"""
 
         # Update gripper state
@@ -283,9 +304,6 @@ class PolicyNode3D(Node):
 
         # Process rs rgb message
         self.rs_rgb_callback(rs_msg)
-
-        # Save data
-        # self.save_data(zed_rgb_msg, zed_depth_msg, rs_msg)
 
         self.update_observation()
 
@@ -309,7 +327,8 @@ class PolicyNode3D(Node):
     def zed_rgb_callback(self, msg):
         """Process zed rgb message"""
         zed_rgb_img = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        self.get_logger().info(f"Zed RGB Image Shape: {zed_rgb_img.shape}")
+        if self.center_crop:
+            zed_rgb_img = self.center_crop_rgb_frames(zed_rgb_img, self.ZED_CROP_SIZE)
         zed_rgb_img = self.resize_for_policy(zed_rgb_img, 'zed_color_images')
 
         self.zed_rgb_buffer.append((zed_rgb_img, time.monotonic() - self.start_time))
@@ -319,6 +338,8 @@ class PolicyNode3D(Node):
     def rs_rgb_callback(self, msg):
         """Process rs rgb message"""
         rs_rgb_img = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        if self.center_crop:
+            rs_rgb_img = self.center_crop_rgb_frames(rs_rgb_img, self.RS_CROP_SIZE)
         rs_rgb_img = self.resize_for_policy(rs_rgb_img, 'rs_color_images')
 
         self.rs_color_buffer.append((rs_rgb_img, time.monotonic() - self.start_time))
@@ -327,8 +348,7 @@ class PolicyNode3D(Node):
 
     def resize_for_policy(self, img: np.ndarray, cam_key: str) -> np.ndarray:
         """
-        Resize *and* change layout from HWC-BGR (OpenCV) to CHW-RGB
-        according to `shape_meta`.
+        Resize *and* change layout from HWC-BGR (OpenCV) to CHW-RGB according to `shape_meta`.
         """
         C, H, W = self.shape_meta['obs'][cam_key]['shape']
         # self.get_logger().info(f"Resizing {cam_key} to {H}x{W}")
@@ -339,6 +359,40 @@ class PolicyNode3D(Node):
         assert img.shape == (C, H, W), \
             f"{cam_key} expected {(C,H,W)}, got {img.shape}"
         return img
+    
+    def center_crop_rgb_frames(self, rgb_img: np.ndarray, crop_size: Tuple[int,int]) -> np.ndarray:
+        """
+        Center crop a single RGB image to target size.
+        
+        Args:
+            rgb_img: Input image in HWC format (H, W, C)
+            crop_size: Target crop size as (width, height)
+        
+        Returns:
+            Cropped image in HWC format
+        """
+        crop_w, crop_h = crop_size
+        
+        # Input should be (H, W, C) for OpenCV images
+        if rgb_img.ndim != 3:
+            raise ValueError(f"Expected (H, W, C), got {rgb_img.shape}")
+        
+        H, W, C = rgb_img.shape
+        
+        # Check if crop size is valid
+        if crop_h > H or crop_w > W:
+            raise ValueError(f"Crop size ({crop_h}, {crop_w}) larger than image size ({H}, {W})")
+        
+        # Calculate center crop coordinates
+        start_y = (H - crop_h) // 2
+        start_x = (W - crop_w) // 2
+        end_y = start_y + crop_h
+        end_x = start_x + crop_w
+        
+        # Crop the image
+        cropped_img = rgb_img[start_y:end_y, start_x:end_x, :]
+        
+        return cropped_img
 
 
 def inference_loop(model_path, shared_obs, action_queue, action_horizon = 4, device = "cuda", start_time = 0):
@@ -379,8 +433,8 @@ def inference_loop(model_path, shared_obs, action_queue, action_horizon = 4, dev
         # Grab new observations
         obs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in obs_now.items()} 
 
-        # Extract pose and point cloud
-        model_obs = {k: obs[k] for k in ("pose", "zed_color_images", "rs_color_images")}
+        # Extract policy observations
+        model_obs = {k: obs[k] for k in ("pose", "zed_color_images","rs_color_images")}
 
         # Predict an action-horizon batch
         with torch.no_grad():
@@ -479,7 +533,7 @@ def detailed_debug_summary(obs, actions, start_time, *, max_channels=6):
             pose = curr_obs.cpu().numpy()
             pose_timestamp = obs["pose_timestamps"][ind]
             pos, rot6d, grip = pose[:3], pose[3:9], pose[9]
-            print(f"Pose {ind + 1}: Position = {pos.round(4)} | Gripper = {grip:.4f} | Timestamp = {pose_timestamp}")
+            print(f"Pose {ind + 1}: Position = {pos.round(4)} | Rotation = {rot6d.round(4)} | Gripper = {grip:.4f} | Timestamp = {pose_timestamp}")
 
     if "zed_color_images" in obs and isinstance(obs["zed_color_images"], torch.Tensor):
         print()
@@ -496,7 +550,7 @@ def detailed_debug_summary(obs, actions, start_time, *, max_channels=6):
     if actions is not None:
         print(f"\nActions to be published\n{'-'*80}")
         for ind, curr_act in enumerate(actions):
-            print(f"Action {ind + 1}: Position = {curr_act[:3].round(4)} | Gripper = {curr_act[9]:.4f} | Timestamp = {time.monotonic() - start_time}")
+            print(f"Action {ind + 1}: Position = {curr_act[:3].round(4)} | Rotation = {curr_act[3:9].round(4)} | Gripper = {curr_act[9]:.4f} | Timestamp = {time.monotonic() - start_time}")
 
     print(bar + "\n")
 
@@ -519,14 +573,14 @@ def main(args=None):
     start_time = time.monotonic()
 
     # Model path
-    model_path = '/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/models/two_cameras_policy.ckpt'
+    model_path = '/home/alex/Documents/3D-Diffusion-Policy/3D-Diffusion-Policy/data/outputs/xarm_ufactory_gripper_2d-train_xarm_baseline_2d-center_crop_seed42/checkpoints/epoch=2000-train_loss=0.00582.ckpt'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     shape_meta = load_shape_meta(model_path)
 
     # Start inference process
     inference_process = Process(
         target=inference_loop, 
-        args=(model_path, shared_obs, action_queue, 4, device, start_time)
+        args=(model_path, shared_obs, action_queue, 2, device, start_time)
     )
     inference_process.daemon = True
     inference_process.start()

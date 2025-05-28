@@ -19,11 +19,14 @@ env_runner: null                 # offline BC only
 # Shapes for encoder and diffusion head
 shape_meta: &shape_meta
   obs:
-    image:
-      shape: [3, 360, 640]       # (C,H,W) after your resize script
+    rs_color_images:
+      shape: [3, 360, 480]       # (C,H,W) after your resize script
       type: rgb
-    agent_pos:
-      shape: [7]                 # x y z qw qx qy qz
-      type: low_dim
+    zed_color_images:
+      shape: [3, 360, 480]
+      type: rgb
+    pose:
+      shape: [10]                 # x y z 6d_pose gripper
+
   action:
-    shape: [7]
+    shape: [10]
