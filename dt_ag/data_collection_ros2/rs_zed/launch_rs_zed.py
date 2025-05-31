@@ -34,20 +34,39 @@ def generate_launch_description():
             name='publish_zed',
             output='screen'
         ),
+
+        # RealSense #1  → namespace /camera1
         Node(
             package='realsense2_camera',
             executable='realsense2_camera_node',
-            name='realsense_camera',  # Changed name to avoid conflict
-            output='screen'
+            name='rs_wrist',
+            namespace='rs_wrist',
+            output='screen',
+            parameters=[{
+                # change these to your desired resolution / FPS
+                'serial_no': '317222074520', # unique to wrist camera
+                'camera_name': 'rs_wrist',
+                'enable_color': True,
+                'enable_depth': False,
+                'rgb_camera.color_profile': '640x360x15',
+            }]
         ),
-        # # Include ZED camera launch file
-        # IncludeLaunchDescription(
-        #     PythonLaunchDescriptionSource(zed_launch_file),
-        #     launch_arguments={
-        #         'camera_model': 'zed2i',  # Change this to your camera model (zed, zed2, zed2i, zedm, zedx, etc.)
-        #         'camera_name': 'zed_camera'  # Optional: set a specific camera name
-        #     }.items()
-        # ),
+
+        # RealSense #2  → namespace /camera2
+        Node(
+            package='realsense2_camera',
+            executable='realsense2_camera_node',
+            name='rs_side',
+            namespace='rs_side',
+            output='screen',
+            parameters=[{
+                'serial_no': '317222074068', # unique to side camera
+                'camera_name': 'rs_side',
+                'enable_color': True,
+                'enable_depth': False,
+                'rgb_camera.color_profile': '640x360x15',
+            }]
+        ),
     ])
 
 def main(argv=sys.argv[1:]):
