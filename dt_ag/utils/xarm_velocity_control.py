@@ -32,9 +32,9 @@ class XArmVelocityController(Node):
         # Declare parameters
         self.ip = self.declare_parameter('xarm_ip', '192.168.1.213').value
         self.control_rate = self.declare_parameter('control_rate', 30.0).value  # Hz
-        self.p_gain_pos = self.declare_parameter('p_gain_position', 10.0).value  # Position P-gain
+        self.p_gain_pos = self.declare_parameter('p_gain_position', 5.0).value  # Position P-gain
         self.p_gain_ori = self.declare_parameter('p_gain_orientation', 1.0).value  # Orientation P-gain
-        self.max_linear_vel = self.declare_parameter('max_linear_velocity', 200.0).value  # mm/s
+        self.max_linear_vel = self.declare_parameter('max_linear_velocity', 100.0).value  # mm/s
         self.max_angular_vel = self.declare_parameter('max_angular_velocity', 1.0).value  # rad/s
         self.position_tolerance = self.declare_parameter('position_tolerance', 5.0).value  # mm
         
@@ -207,16 +207,16 @@ class XArmVelocityController(Node):
                 vel_angular = vel_angular * (self.max_angular_vel / vel_angular_norm)
                 vel_roll, vel_pitch, vel_yaw = vel_angular
 
-            # Check if we're close enough to target
-            position_error = np.linalg.norm([error_x, error_y, error_z])
-            if position_error < self.position_tolerance:
-                # Close to target, reduce velocities
-                vel_x *= 0.5
-                vel_y *= 0.5
-                vel_z *= 0.5
-                vel_roll *= 0.5
-                vel_pitch *= 0.5
-                vel_yaw *= 0.5
+            # # Check if we're close enough to target
+            # position_error = np.linalg.norm([error_x, error_y, error_z])
+            # if position_error < self.position_tolerance:
+            #     # Close to target, reduce velocities
+            #     vel_x *= 0.5
+            #     vel_y *= 0.5
+            #     vel_z *= 0.5
+            #     vel_roll *= 0.5
+            #     vel_pitch *= 0.5
+            #     vel_yaw *= 0.5
 
             # Send velocity command
             velocities = [vel_x, vel_y, vel_z, vel_roll, vel_pitch, vel_yaw]

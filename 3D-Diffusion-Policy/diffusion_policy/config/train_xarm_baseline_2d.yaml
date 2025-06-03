@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - task: xarm_ufactory_gripper_2d     # 👈 tie to the task above
+  - task: xarm_baseline_2d     # 👈 tie to the task above
 
 name: train_diffusion_unet_image_xarm
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
@@ -8,7 +8,7 @@ _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainD
 # ------------------------------------------------------------------
 task_name:     ${task.name}
 shape_meta:    ${task.shape_meta}
-exp_name:      "xarm_2d_unet"
+exp_name:      "baseline"
 
 horizon:            8
 n_obs_steps:        2
@@ -48,7 +48,7 @@ policy:
   kernel_size: 5
   n_groups: 8
   cond_predict_scale: true
-  num_inference_steps: 100
+  num_inference_steps: 10
   obs_as_global_cond: ${obs_as_global_cond}
 
   noise_scheduler:
@@ -71,12 +71,13 @@ ema:
 
 dataloader:
   batch_size: 64
-  num_workers: 8
-  persistent_workers: true
+  num_workers: 0
+  persistent_workers: False
 
 val_dataloader:
   batch_size: 64
   num_workers: 8
+  persistent_workers: True
 
 optimizer:
   _target_: torch.optim.AdamW
@@ -87,7 +88,7 @@ optimizer:
 training:
   device: cuda:0
   seed: 42
-  num_epochs: 2001
+  num_epochs: 3001
   gradient_accumulate_every: 1
   use_ema: true
   freeze_encoder: true

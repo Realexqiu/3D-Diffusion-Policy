@@ -7,10 +7,10 @@ from launch.actions import ExecuteProcess
 from launch_ros.actions import Node
 
 def generate_launch_description():
-    script_1 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data_collection_ros2/rs_zed_dt/3d_rs_zed_dt_hdf5_collector.py"
+    script_1 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data_collection_ros2/rs_zed_dt/rs_zed_dt_hdf5_collector.py"
     script_2 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data_collection_ros2/xarm_spacemouse_ros2.py"
-    script_3 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/publish_zed.py"
-    script_4 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/publish_dt.py"
+    script_3 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data_collection_ros2/publish_zed_data_collection.py"
+    script_4 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/utils/publish_dt.py"
 
     return LaunchDescription([
         ExecuteProcess(
@@ -35,21 +35,21 @@ def generate_launch_description():
         ),
 
         # RealSense #1  → namespace /camera1
-        Node(
-            package='realsense2_camera',
-            executable='realsense2_camera_node',
-            name='rs_wrist',
-            namespace='rs_wrist',
-            output='screen',
-            parameters=[{
-                # change these to your desired resolution / FPS
-                'serial_no': '317222074520', # unique to wrist camera
-                'camera_name': 'rs_wrist',
-                'enable_color': True,
-                'enable_depth': False,
-                'rgb_camera.color_profile': '640x360x15',
-            }]
-        ),
+        # Node(
+        #     package='realsense2_camera',
+        #     executable='realsense2_camera_node',
+        #     name='rs_wrist',
+        #     namespace='rs_wrist',
+        #     output='screen',
+        #     parameters=[{
+        #         # change these to your desired resolution / FPS
+        #         'serial_no': '317222074520', # unique to wrist camera
+        #         'camera_name': 'rs_wrist',
+        #         'enable_color': True,
+        #         'enable_depth': False,
+        #         'rgb_camera.color_profile': '640x360x15',
+        #     }]
+        # ),
 
         # RealSense #2  → namespace /camera2
         Node(

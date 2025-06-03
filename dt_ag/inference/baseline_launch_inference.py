@@ -7,9 +7,9 @@ from launch.actions import ExecuteProcess
 from launch_ros.actions import Node
 
 def generate_launch_description():
-    script_1 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/utils/publish_zed.py"
-    script_3 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/utils/xarm_state_publisher.py"
-    script_4 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/utils/xarm_velocity_control.py"
+    script_1 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/utils/publish_zed.py"
+    script_3 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/utils/xarm_state_publisher.py"
+    script_4 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/utils/xarm_velocity_control.py"
     
     return LaunchDescription([
         ExecuteProcess(
@@ -17,11 +17,6 @@ def generate_launch_description():
             name='publish_zed',
             output='screen'
         ),
-        # ExecuteProcess(
-        #     cmd=['python3', script_2],
-        #     name='xarm_state_and_pos_control',
-        #     output='screen'
-        # ),
         ExecuteProcess(
             cmd=['python3', script_3],
             name='xarm_state_publisher',
@@ -33,22 +28,22 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # RealSense #1  → namespace/camera1
-        Node(
-            package='realsense2_camera',
-            executable='realsense2_camera_node',
-            name='rs_wrist',
-            namespace='rs_wrist',
-            output='screen',
-            parameters=[{
-                # change these to your desired resolution / FPS
-                'serial_no': '317222074520', # unique to wrist camera
-                'camera_name': 'rs_wrist',
-                'enable_color': True,
-                'enable_depth': False,
-                'rgb_camera.color_profile': '640x360x30',
-            }]
-        ),
+        # # RealSense #1  → namespace/camera1
+        # Node(
+        #     package='realsense2_camera',
+        #     executable='realsense2_camera_node',
+        #     name='rs_wrist',
+        #     namespace='rs_wrist',
+        #     output='screen',
+        #     parameters=[{
+        #         # change these to your desired resolution / FPS
+        #         'serial_no': '317222074520', # unique to wrist camera
+        #         'camera_name': 'rs_wrist',
+        #         'enable_color': True,
+        #         'enable_depth': False,
+        #         'rgb_camera.color_profile': '640x360x30',
+        #     }]
+        # ),
 
         # RealSense #2  → namespace /camera2
         Node(

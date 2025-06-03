@@ -161,7 +161,7 @@ CMD ["/bin/bash"]
 #     -p size:=0.1
 
 # Tag in xarm base frame:
-    # [0.220, 0.007, 0.010] # x, y, z
+    # [0.290, -0.040, 0.010] # x, y, z
 
 # ZED Left frame in xarm base frame:
-    # [0.59, 0.52, 0.31], [0.41, 0.69, -0.52, -0.29] # x, y, z, qx, qy, qz, qw
+    # [0.75, 0.25, 0.48], [0.63, 0.57, -0.35, -0.40] # x, y, z, qx, qy, qz, qw

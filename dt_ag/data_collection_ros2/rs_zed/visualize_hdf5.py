@@ -1,130 +1,187 @@
 #!/usr/bin/env python3
-import os
+"""
+Universal HDF5 Episode Visualiser
+=================================
+• Detects images saved either channel-last (H,W,C) or channel-first (C,H,W)
+  and their time-series variants (N, …).
+• Supports colour (RGB / RGBA), grayscale and depth (uint16 or float32 metres).
+• Keyboard controls:
+      n / →   next frame
+      p / ←   previous frame
+      q / Esc quit current episode
+• Requires: h5py, numpy, opencv-python
+"""
+
+import os, glob, math, sys
+import cv2
 import h5py
 import numpy as np
-import cv2
-import glob
 
-# Standard display size for all windows
-DISPLAY_WIDTH = 640
-DISPLAY_HEIGHT = 480
+# ─── Display layout ────────────────────────────────────────────────────────────
+WIN_W, WIN_H = 640, 480      # size of each OpenCV window
 
-def resize_for_display(image):
-    return cv2.resize(image, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
+# ─── Dataset helpers ───────────────────────────────────────────────────────────
+def looks_like_image(shape):
+    """
+    Return True if the ndarray shape *could* be an image or stack of images in
+    either channel-last or channel-first order.
+    Accepted layouts:
+        (H,W)                                – single gray/depth
+        (H,W,C)  where C∈{1,3,4}             – single image, channel-last
+        (C,H,W)  where C∈{1,3,4}             – single image, channel-first
+        (N,H,W)                              – sequence gray/depth
+        (N,H,W,C) where C∈{1,3,4}            – sequence, channel-last
+        (N,C,H,W) where C∈{1,3,4}            – sequence, channel-first
+    """
+    if len(shape) == 2:
+        return True
+    if len(shape) == 3:
+        return shape[2] in (1, 3, 4) or shape[0] in (1, 3, 4)
+    if len(shape) == 4:
+        return (shape[3] in (1,3,4)) or (shape[1] in (1,3,4))
+    return False
 
-def visualize_depth(image):
-    if image.ndim != 2:
-        print(f"Depth image has unexpected shape {image.shape}, skipping.")
-        return np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
 
-    is_float = np.issubdtype(image.dtype, np.floating)
-    if is_float:
-        valid = np.logical_and(np.isfinite(image), image > 0)
-        if not np.any(valid):
-            print("No valid depth data found")
-            return np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
-        vals = image[valid]
-        d_min, d_max = vals.min(), vals.max()
-        print(f"Depth range: {d_min:.3f} to {d_max:.3f} meters")
+def to_hwc(img):
+    """Convert an image in any accepted layout to H×W×C (C∈{1,3})."""
+    if img.ndim == 2:                  # gray / depth
+        return img[..., None]          # add dummy channel
+    if img.ndim == 3:
+        if img.shape[0] in (1,3,4):    # CHW
+            return img.transpose(1,2,0)
+        return img                     # already HWC
+    raise ValueError(f"Unsupported ndim {img.ndim}")
+
+
+def depth_viz(depth):
+    """
+    Convert depth (H×W×1, uint16 mm or float32 m) to a colour map for display.
+    Invalid / zero pixels are shown black.
+    """
+    depth = depth.squeeze()
+    if depth.dtype == np.uint16:
+        valid = depth > 0
+        depth_m = depth.astype(np.float32) / 1000.0
     else:
-        valid = image > 0
-        if not np.any(valid):
-            print("No valid depth data found")
-            return np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
-        vals = image[valid]
-        d_min, d_max = vals.min(), vals.max()
-        print(f"Depth range: {d_min} to {d_max} millimeters")
+        valid = np.isfinite(depth) & (depth > 0)
+        depth_m = depth
 
-    if d_min == d_max:
-        d_min, d_max = 0, 1
+    if not np.any(valid):
+        return np.zeros((WIN_H, WIN_W, 3), np.uint8)
 
-    norm = np.zeros_like(image, dtype=np.float32)
-    norm[valid] = 255 * (image[valid] - d_min) / (d_max - d_min)
-    depth_viz = norm.astype(np.uint8)
-    cmap = cv2.applyColorMap(depth_viz, cv2.COLORMAP_JET)
-    cmap[~valid] = [0, 0, 0]
-    return resize_for_display(cmap)
+    d_min, d_max = depth_m[valid].min(), depth_m[valid].max()
+    if abs(d_max - d_min) < 1e-6:
+        d_max = d_min + 1e-3
+    norm = np.zeros_like(depth_m, np.float32)
+    norm[valid] = (depth_m[valid] - d_min) / (d_max - d_min) * 255
+    colour = cv2.applyColorMap(norm.astype(np.uint8), cv2.COLORMAP_JET)
+    colour[~valid] = 0
+    return cv2.resize(colour, (WIN_W, WIN_H))
 
-def show_episode(hdf5_path):
-    print(f"\n=== Episode: {hdf5_path} ===")
-    with h5py.File(hdf5_path, "r") as f:
-        print("Datasets:")
-        for k in f.keys():
-            print(f"  {k}: {f[k].shape}")
 
-        # determine frame count
-        total = 0
-        for k in f.keys():
-            if f[k].ndim >= 1 and f[k].shape[0] > 1:
-                total = f[k].shape[0]
-                break
-        if total == 0:
-            print("Could not determine frame count, skipping.")
+def visualise(img):
+    """Return a BGR image suitable for cv2.imshow()."""
+    img = to_hwc(img)
+    H, W, C = img.shape
+
+    # depth?
+    if C == 1 and (img.dtype == np.uint16 or np.issubdtype(img.dtype, np.floating)):
+        return depth_viz(img)
+
+    # grayscale
+    if C == 1:
+        view = img.astype(np.float32)
+        if view.max() <= 1.0:       # normalise [0,1]→[0,255]
+            view *= 255
+        view = cv2.cvtColor(view.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        return cv2.resize(view, (WIN_W, WIN_H))
+
+    # colour (assume RGB / RGBA)
+    if C == 4:                      # drop alpha
+        img = img[..., :3]
+    if np.issubdtype(img.dtype, np.floating) and img.max() <= 1.0:
+        img = (img * 255).astype(np.uint8)
+    view = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    return cv2.resize(view, (WIN_W, WIN_H))
+
+
+# ─── Main visualiser logic ─────────────────────────────────────────────────────
+def gather_datasets(h5):
+    """Return a dict {name: (ds, sequence_length)} for every image-like dataset."""
+    out = {}
+    def visitor(name, obj):
+        if isinstance(obj, h5py.Dataset) and looks_like_image(obj.shape):
+            if len(obj.shape) == 4:          # time series
+                length = obj.shape[0]
+            elif len(obj.shape) == 3 and obj.shape[0] not in (1,3,4):
+                length = obj.shape[0]        # gray/depth sequence (N,H,W)
+            else:
+                length = 1
+            out[name] = (obj, length)
+    h5.visititems(visitor)
+    return out
+
+
+def show_episode(path):
+    print(f"\n=== {os.path.basename(path)} ===")
+    with h5py.File(path, "r") as h5:
+        datasets = gather_datasets(h5)
+        if not datasets:
+            print("No image-like datasets found.")
             return
 
-        first_idx, last_idx = 0, total - 1
+        max_len = max(L for _, L in datasets.values())
+        print(f"Found {len(datasets)} datasets, longest length {max_len} frames.")
+        positions = grid_positions(len(datasets))
 
-        # window positions
-        w, h = DISPLAY_WIDTH, DISPLAY_HEIGHT
-        pos = {
-            "RS-C-1": (0,   0),
-            "RS-D-1": (w,   0),
-            "ZED-C-1": (0,   h),
-            "ZED-D-1": (w,   h),
-            "RS-C-2": (3*w, 0),
-            "RS-D-2": (4*w, 0),
-            "ZED-C-2": (3*w, h),
-            "ZED-D-2": (4*w, h),
-        }
+        frame = 0
+        while True:
+            for idx, (name, (ds, length)) in enumerate(datasets.items()):
+                if frame >= length:
+                    continue
+                # retrieve frame, handling layout
+                if len(ds.shape) == 4 and ds.shape[0] == length:      # N,H,W,C or N,C,H,W
+                    img = ds[frame]
+                elif len(ds.shape) == 3 and ds.shape[0] == length:    # N,H,W gray/depth
+                    img = ds[frame]
+                else:
+                    img = ds[()]                                      # single image
+                view = visualise(img)
+                win = f"{name}"
+                cv2.imshow(win, view)
+                cv2.moveWindow(win, *positions[idx])
 
-        def display_frame(idx, suffix):
-            # RealSense color
-            if "rs_color_images" in f:
-                img = f["rs_color_images"][idx]
-                disp = resize_for_display(img)
-                name = f"RS-C-{suffix}"
-                cv2.imshow(name, disp)
-                cv2.moveWindow(name, *pos[name])
-            # RealSense depth
-            if "rs_depth_images" in f:
-                img = f["rs_depth_images"][idx]
-                disp = visualize_depth(img)
-                name = f"RS-D-{suffix}"
-                cv2.imshow(name, disp)
-                cv2.moveWindow(name, *pos[name])
-            # ZED color
-            if "zed_color_images" in f:
-                img = f["zed_color_images"][idx]
-                disp = resize_for_display(img)
-                name = f"ZED-C-{suffix}"
-                cv2.imshow(name, disp)
-                cv2.moveWindow(name, *pos[name])
-            # ZED depth
-            if "zed_depth_images" in f:
-                img = f["zed_depth_images"][idx]
-                disp = visualize_depth(img)
-                name = f"ZED-D-{suffix}"
-                cv2.imshow(name, disp)
-                cv2.moveWindow(name, *pos[name])
+            key = cv2.waitKey(0) & 0xFF
+            if key in (ord('q'), 27):        # q or Esc → quit episode
+                break
+            if key in (ord('n'), ord(' '), 83, 0x27):   # n, space, → arrow
+                frame = min(frame + 1, max_len - 1)
+            elif key in (ord('p'), 81, 0x25):           # p, ← arrow
+                frame = max(frame - 1, 0)
 
-        print(f"\n-- Showing first frame (idx {first_idx}) --")
-        display_frame(first_idx, "1")
-        print(f"\n-- Showing last frame (idx {last_idx}) --")
-        display_frame(last_idx, "2")
-
-        print("\nPress any key to continue to next episode...")
-        cv2.waitKey(0)
         cv2.destroyAllWindows()
 
-def main():
-    demo_data_dir = os.path.join(os.getcwd(), "1")
-    hdf5_files = sorted(glob.glob(os.path.join(demo_data_dir, "*.hdf5")))
-    if not hdf5_files:
-        print(f"No HDF5 files found in {demo_data_dir}")
-        return
 
-    for path in hdf5_files:
-        show_episode(path)
+def grid_positions(n):
+    """Return {idx: (x,y)} so windows tile without overlap."""
+    cols = math.ceil(math.sqrt(n))
+    rows = math.ceil(n / cols)
+    pos = {}
+    for i in range(n):
+        r, c = divmod(i, cols)
+        pos[i] = (c * WIN_W, r * WIN_H)
+    return pos
+
+
+def main(root="demo_data"):
+    files = sorted(glob.glob(os.path.join(root, "*.hdf5")))
+    if not files:
+        print(f"No HDF5 files in {root}")
+        sys.exit(0)
+
+    for f in files:
+        show_episode(f)
+
 
 if __name__ == "__main__":
     main()

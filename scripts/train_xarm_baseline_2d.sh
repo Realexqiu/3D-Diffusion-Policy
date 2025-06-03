@@ -5,7 +5,7 @@
 #   bash scripts/train_xarm_baseline_2d.sh <alg_yaml> <task_yaml> <tag> <seed> <gpu>
 #
 # Example:
-#   bash scripts/train_xarm_baseline_2d.sh train_xarm_baseline_2d xarm_ufactory_gripper_2d test_2d 42 0
+#   bash scripts/train_xarm_baseline_2d.sh train_xarm_baseline_2d xarm_baseline_2d test_2d 42 0
 set -e
 
 # ─── User switches ──────────────────────────────────────────────────────────────
@@ -14,13 +14,13 @@ SAVE_CKPT=True    # always keep checkpoints
 # ────────────────────────────────────────────────────────────────────────────────
 
 ALG=${1:-train_xarm_baseline_2d}
-TASK=${2:-xarm_ufactory_gripper_2d}
+TASK=${2:-xarm_baseline_2d}
 TAG=${3:-$(date +%m%d)}
 SEED=${4:-42}
 GPU=${5:-0}
 
 EXP="${TASK}-${ALG}-${TAG}"
-RUN_DIR="data/outputs/${EXP}_seed${SEED}"
+RUN_DIR="runs/${EXP}_seed${SEED}"
 
 printf "\033[33m► GPU        : %s\n► experiment : %s\033[0m\n" "${GPU}" "${EXP}"
 if [ "${DEBUG}" = True ]; then
@@ -41,7 +41,7 @@ export HYDRA_FULL_ERROR=1
 export CUDA_VISIBLE_DEVICES="${GPU}"
 
 # ─── Launch training ───────────────────────────────────────────────────────────
-python train_2d.py \
+accelerate launch --num_processes 1 train_2d.py \
   --config-name "${ALG}.yaml" \
   task="${TASK}" \
   hydra.run.dir="${RUN_DIR}" \
@@ -50,6 +50,17 @@ python train_2d.py \
   training.device="cuda:${GPU}" \
   exp_name="${EXP}" \
   logging.mode="${WANDB_MODE}"
+
+# python train_2d.py \
+#   --config-name "${ALG}.yaml" \
+#   task="${TASK}" \
+#   hydra.run.dir="${RUN_DIR}" \
+#   training.debug="${DEBUG}" \
+#   training.seed="${SEED}" \
+#   training.device="cuda:${GPU}" \
+#   exp_name="${EXP}" \
+#   logging.mode="${WANDB_MODE}"
+
 
 # (optionally add) \
 #  checkpoint.save_ckpt="${SAVE_CKPT}"

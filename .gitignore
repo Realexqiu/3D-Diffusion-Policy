@@ -30,8 +30,10 @@ _C.cpython-39-x86_64-linux-gnu.so
 real_robot_data/
 output.gif
 output.mp4
-output.png
+runs/
 
+output.png
+*.ckpt
 test.gif
 test.mp4
 test_depth.mp4

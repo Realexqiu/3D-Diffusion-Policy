@@ -392,7 +392,7 @@ def main():
     """Main function to run the inspector."""
     
     # Path to your Zarr dataset
-    ZARR_PATH = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/3d_strawberry_baseline/new_setup_100_baseline_zarr_2d")
+    ZARR_PATH = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_baseline/10_hz_baseline_100_zarr_downsized")
     
     # Inspect the first episode (you can change this)
     EPISODE_IDX = 0

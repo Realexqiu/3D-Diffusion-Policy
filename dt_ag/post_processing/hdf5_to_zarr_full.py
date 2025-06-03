@@ -1,355 +1,254 @@
 #!/usr/bin/env python3
 """
-Integrated HDF5 → (GDINO + SAM-2) → Zarr converter
-with automatic mask & frame dumping.
-
-If DEBUGGING is True we process only the first episode (episode_0000);
-otherwise we process every .hdf5 file.
-
-For *each* episode we now create:
-  extras_dir/
-     episode_0000/
-        masks/                 ← all per-frame mask PNGs
-        rs_rgb_first.png
-        rs_depth_first.png
-        zed_rgb_first.png
-        zed_depth_first.png
-        rs_rgb_last.png
-        rs_depth_last.png
-        zed_rgb_last.png
-        zed_depth_last.png
+Dynamic HDF5 → Zarr converter with optional GDINO + SAM-2 processing
+===================================================================
+• Works with episodes recorded by either collector variant:
+      – rs_side_rgb, zed_rgb, zed_depth (+/- dt_left, dt_right)
+• An episode is considered complete only w.r.t. its own
+  grp.attrs["original_keys"] (+ optional 'action').
+• Stores first/last frame PNGs to a *_debug folder as before.
 """
 
 # ────────────────────────────────────────────────────────────────
-#  Standard imports
+#  Imports
 # ────────────────────────────────────────────────────────────────
-import os, glob
+import os, glob, traceback
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing  import Dict, List, Tuple, Optional
 
-import cv2
-from PIL import Image
-import h5py
-import numpy as np
-import torch
-import zarr
-from natsort import natsorted
+import cv2, h5py, zarr, numpy as np
+from PIL        import Image
+from natsort    import natsorted
 from rich.console import Console
-from tqdm import tqdm
+from tqdm       import tqdm
 
-from inference.custom_gsam_utils_v2 import GroundedSAM2 as GSamUtil, default_gsam_config
-from rotation_transformer import RotationTransformer
+# Optional extras ------------------------------------------------------------
+try:
+    from inference.custom_gsam_utils_v2 import GroundedSAM2 as GSamUtil, default_gsam_config
+    GSAM_AVAILABLE = True
+except ImportError:
+    GSAM_AVAILABLE = False
+    print("Warning: GSAM not available – mask/PCD generation disabled.")
 
-DEBUGGING = False  # if True: only process episode_0000
-USE_GSAM = False
-CONSOLE = Console()
-rotation_transformer = RotationTransformer(from_rep='quaternion', to_rep='rotation_6d')
+try:
+    from rotation_transformer import RotationTransformer
+    rotation_transformer = RotationTransformer(from_rep='quaternion', to_rep='rotation_6d')
+    ROTATION_TRANSFORMER_AVAILABLE = True
+except ImportError:
+    ROTATION_TRANSFORMER_AVAILABLE = False
+    print("Warning: rotation_transformer not available – pose kept as quaternion.")
 
-# ────────────────────────────────────────────────────────────────
-#  Helper functions
-# ────────────────────────────────────────────────────────────────
-def hdf5_to_dict(pth: str) -> Dict[str, np.ndarray]:
-    with h5py.File(pth, "r") as f:
+DEBUGGING  = False       # only convert episode_0000 when True
+USE_GSAM   = False and GSAM_AVAILABLE
+CONSOLE    = Console()
+
+# ---------------------------------------------------------------------------
+#  Dataset type helpers
+# ---------------------------------------------------------------------------
+IMAGE_KEYS = {
+    'rgb', 'color', 'image',          # generic
+    'rs_side_rgb',                    # RealSense side cam   ← added
+    'zed_rgb', 'zed_color',
+    'dt_left', 'dt_right'
+}
+DEPTH_KEYS = {'depth', 'zed_depth'}
+POSE_KEYS  = {'pose', 'last_pose'}
+
+def hdf5_to_dict(p: str) -> Dict[str, np.ndarray]:
+    with h5py.File(p, 'r') as f:
         return {k: f[k][()] for k in f.keys()}
 
-def ensure_dir(p: Path) -> None:
+def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
 
-def save_depth_png(depth: np.ndarray, out_file: Path) -> None:
-    """Normalize a float32 depth map, apply viridis colormap, save to PNG."""
+def is_image_data(key: str, arr: np.ndarray) -> bool:
+    if any(k in key.lower() for k in IMAGE_KEYS):
+        return True
+    if arr.ndim in (3,4) and arr.dtype == np.uint8:
+        if arr.ndim == 4 and (arr.shape[-1] == 3 or arr.shape[1] == 3):
+            return True
+    return False
+
+def is_depth_data(key: str, arr: np.ndarray) -> bool:
+    return (key.lower() in DEPTH_KEYS or any(k in key.lower() for k in DEPTH_KEYS)) \
+           and arr.dtype in (np.uint16, np.float32, np.float64)
+
+def save_depth_png(depth: np.ndarray, out_file: Path):
     depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
     if depth.max() == depth.min():
-        norm = np.zeros_like(depth, dtype=np.uint8)
+        norm = np.zeros_like(depth, np.uint8)
     else:
-        norm = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX)
-    norm = norm.astype(np.uint8)
-    color = cv2.applyColorMap(norm, cv2.COLORMAP_VIRIDIS)
-    cv2.imwrite(str(out_file), color)
+        norm = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    colour = cv2.applyColorMap(norm, cv2.COLORMAP_VIRIDIS)
+    cv2.imwrite(str(out_file), colour)
 
-def dump_first_last_frames(rs_rgb: np.ndarray, rs_depth: np.ndarray, zed_rgb: np.ndarray, zed_depth: np.ndarray, ep_dir: Path) -> None:
-    """Save first/last RGB & depth frames for RS and ZED cameras."""
+def save_first_last_frames(data: Dict[str, np.ndarray], ep_dir: Path):
     ensure_dir(ep_dir)
-    first, last = 0, rs_rgb.shape[0] - 1
-    for idx, tag in [(first, "first"), (last, "last")]:
-        # RS RGB
-        cv2.imwrite(str(ep_dir / f"rs_rgb_{tag}.png"), rs_rgb[idx])
-        # RS depth
-        save_depth_png(rs_depth[idx], ep_dir / f"rs_depth_{tag}.png")
-        # ZED RGB
-        cv2.imwrite(str(ep_dir / f"zed_rgb_{tag}.png"), zed_rgb[idx])
-        # ZED depth
-        save_depth_png(zed_depth[idx], ep_dir / f"zed_depth_{tag}.png")
+    T = next(iter(data.values())).shape[0]
+    for key, arr in data.items():
+        first, last = arr[0], arr[T-1]
+        for img, tag in [(first,'first'), (last,'last')]:
+            if is_image_data(key, arr):
+                img_hwc = img.transpose(1,2,0) if (img.ndim==3 and img.shape[0]==3) else img
+                cv2.imwrite(str(ep_dir/f"{key}_{tag}.png"),
+                            cv2.cvtColor(img_hwc, cv2.COLOR_RGB2BGR) if img_hwc.shape[-1]==3 else img_hwc)
+            elif is_depth_data(key, arr):
+                save_depth_png(img, ep_dir/f"{key}_{tag}.png")
 
-def check_episode_complete(zarr_group, episode_name: str) -> bool:
-    """Check if an episode has been completely processed."""
-    if episode_name not in zarr_group:
+# ---------------------------------------------------------------------------
+#  Episode completeness (data-driven)
+# ---------------------------------------------------------------------------
+def episode_complete(g: zarr.hierarchy.Group) -> bool:
+    if 'length' not in g.attrs or 'original_keys' not in g.attrs:
         return False
-    
-    ep_group = zarr_group[episode_name]
-    if USE_GSAM:
-        required_arrays = ["rs_rgb", "rs_depth", "zed_rgb", "zed_depth", "zed_pcd", "pose", "action"]
-    else:
-        required_arrays = ["rs_rgb", "rs_depth", "zed_rgb", "zed_depth", "pose", "action"]
-    
-    for array_name in required_arrays:
-        if array_name not in ep_group:
-            CONSOLE.log(f"[yellow]Episode {episode_name} missing {array_name}, will reprocess")
-            return False
-    
-    # Check if the episode has the expected length attribute
-    if "length" not in ep_group.attrs:
-        CONSOLE.log(f"[yellow]Episode {episode_name} missing length attribute, will reprocess")
+    expected = set(g.attrs['original_keys'])
+    if 'action' in g:
+        expected.add('action')
+    missing = [k for k in expected if k not in g]
+    if missing:
+        CONSOLE.log(f"[yellow]{g.name} missing {missing}")
         return False
-    
-    # Check if pose has the expected 10D shape (9D pose + 1D gripper)
-    if ep_group["pose"].shape[1] != 10:
-        CONSOLE.log(f"[yellow]Episode {episode_name} has {ep_group['pose'].shape[1]}D pose instead of 10D, will reprocess")
-        return False
-    
     return True
 
-def get_processed_episodes(zarr_dir: Path) -> set:
-    """Get set of already processed episode names."""
-    processed = set()
-    
-    if not zarr_dir.exists():
-        return processed
-    
-    try:
-        root = zarr.open(zarr_dir, mode="r")
-        for key in root.keys():
-            if key.startswith("episode_") and check_episode_complete(root, key):
-                processed.add(key)
-        CONSOLE.log(f"[green]Found {len(processed)} already processed episodes")
-        if processed:
-            sorted_episodes = sorted(processed)
-            CONSOLE.log(f"[green]Processed episodes: {sorted_episodes[0]} to {sorted_episodes[-1]}")
-    except Exception as e:
-        CONSOLE.log(f"[yellow]Could not read existing Zarr file: {e}")
-    
-    return processed
+def already_done(root: zarr.hierarchy.Group) -> set:
+    done = {ep for ep in root.keys()
+            if ep.startswith('episode_') and episode_complete(root[ep])}
+    if done:
+        CONSOLE.log(f"[green]Already done: {len(done)} episode(s)")
+    return done
 
-def combine_pose_gripper(pose: np.ndarray, gripper: np.ndarray) -> np.ndarray:
-    """    
-    Args:
-        pose: (T, 7) array with [x, y, z, qw, qx, qy, qz]
-        gripper: (T,) array with gripper positions
-    
-    Returns:
-        (T, 10) array with [x, y, z, rot6d_0, rot6d_1, rot6d_2, rot6d_3, rot6d_4, rot6d_5, gripper]
-    """
-    # Ensure gripper is 2D for concatenation
-    if gripper.ndim == 1:
-        gripper = gripper.reshape(-1, 1)
-    
-    # Extract xyz and quaternion (wxyz format)
-    xyz = pose[:, :3]  # (T, 3)
-    quat_wxyz = pose[:, 3:]  # (T, 4) - [qw, qx, qy, qz]
-    
-    # Convert quaternion to 6D rotation using rotation transformer
-    rot6d = rotation_transformer.forward(quat_wxyz)  # (T, 6)
-    
-    # Concatenate: xyz + 6D rotation + gripper
-    pose_10d = np.concatenate([xyz, rot6d, gripper], axis=1)  # (T, 10)
-    
-    CONSOLE.log(f"[blue]Combined pose shape: xyz {xyz.shape} + rot6d {rot6d.shape} + gripper {gripper.shape} → {pose_10d.shape}")
-    return pose_10d
+# ---------------------------------------------------------------------------
+#  Pose helper
+# ---------------------------------------------------------------------------
+def combine_pose_gripper(pose: np.ndarray, grip: np.ndarray) -> np.ndarray:
+    grip = grip.reshape(-1,1) if grip.ndim == 1 else grip
+    if ROTATION_TRANSFORMER_AVAILABLE:
+        xyz  = pose[:, :3]
+        rot6 = rotation_transformer.forward(pose[:, 3:])
+        return np.concatenate([xyz, rot6, grip], 1).astype(np.float32)
+    else:
+        raise ValueError("Rotation transformer not available")
 
-# ────────────────────────────────────────────────────────────────
-#  GSAM wrapper
-# ────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+#  Optional GSAM-2 wrapper
+# ---------------------------------------------------------------------------
 class GSAM2:
     def __init__(self):
         self.cfg  = default_gsam_config()
         self.util = GSamUtil(cfg=self.cfg, use_weights=True)
 
-    def process_episode(self, frames: np.ndarray, depths: np.ndarray, mask_dump_dir: Path) -> List[np.ndarray]:
-        """Runs Grounded SAM-2 tracking + PCD generation for an episode."""
+    def process(self, frames: np.ndarray, depths: Optional[np.ndarray], dump: Path):
+        ensure_dir(dump)
         T = len(frames)
-        ensure_dir(mask_dump_dir)
-
-        # ── detect boxes on the first frame ─────────────────────────
         boxes, ok = self.util.detect_boxes(frames[0])
         if not ok:
-            empty = np.zeros((T, self.cfg["pts_per_pcd"], 6), np.float32)
-            return [pc for pc in empty]
+            return []
 
-        # ── initialise masks & tracking ─────────────────────────────
-        init_masks = self.util.init_track(frames[0], boxes)
+        masks0 = self.util.init_track(frames[0], boxes)
+        for oid, m in masks0.items():
+            Image.fromarray(m).save(dump / f"frame_0000_obj{oid}_mask.png")
 
-        # decide storage based on weighted flag
-        if self.util.use_weights:
-            masks: Dict[int, Union[np.ndarray, Dict[int, np.ndarray]]] = {0: init_masks}
-        else:
-            combined0 = np.zeros_like(next(iter(init_masks.values())), np.uint8)
-            for m in init_masks.values():
-                combined0 |= m
-            masks = {0: combined0}
-
-        # dump initial masks
-        for obj_id, m in init_masks.items():
-            Image.fromarray(m).save(mask_dump_dir / f"frame_0000_obj{obj_id}_mask.png")
-        if not self.util.use_weights:
-            Image.fromarray(masks[0]).save(mask_dump_dir / "frame_0000_combined_mask.png")
-
-        # ── propagate masks through subsequent frames ───────────────
+        masks = {0: masks0}
         for t in range(1, T):
-            prop = self.util.propagate(frames[t])
-            if isinstance(prop, dict):
-                if self.util.use_weights:
-                    masks[t] = prop
-                else:
-                    combined = np.zeros_like(next(iter(prop.values())), np.uint8)
-                    for m in prop.values():
-                        combined |= m
-                    masks[t] = combined
-            else:
-                masks[t] = prop
+            mp = self.util.propagate(frames[t])
+            masks[t] = mp
+            for oid, m in mp.items():
+                Image.fromarray(m).save(dump / f"frame_{t:04d}_obj{oid}_mask.png")
 
-        # dump propagated masks
-        for t, m in masks.items():
-            if isinstance(m, np.ndarray):
-                Image.fromarray(m).save(mask_dump_dir / f"mask_{t:04d}.png")
+        if depths is None:
+            CONSOLE.log("[yellow]No depth → skipping PCD")
+            return []
 
-        # ── generate point clouds ───────────────────────────────────
-        pcds = []
-        for t in range(T):
-            mask_input = masks[t]
-            pcd = self.util._make_pcd(mask_input, depths[t], frames[t])
-            pcds.append(pcd)
+        pcds = [self.util._make_pcd(masks[t], depths[t], frames[t]) for t in range(T)]
         return pcds
 
-# ────────────────────────────────────────────────────────────────
-#  Main conversion routine
-# ────────────────────────────────────────────────────────────────
-def main() -> None:
-    H5_DIR  = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/3d_strawberry_baseline/new_setup_100_baseline")
-    ZARR_DIR = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/3d_strawberry_baseline/new_setup_100_baseline_zarr")
+# ---------------------------------------------------------------------------
+#  Main conversion
+# ---------------------------------------------------------------------------
+def main():
+    H5_DIR   = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_dt/10_hz_dt_100")
+    ZARR_DIR = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_dt/10_hz_dt_100_zarr")
     ZARR_DIR.mkdir(parents=True, exist_ok=True)
 
-    # extras directory lives next to the Zarr output
-    if ZARR_DIR.name.endswith("_zarr"):
-        debug_name = ZARR_DIR.name.replace("_zarr", "_debug")
-    else:
-        debug_name = f"{ZARR_DIR.name}_debug"
-    DEBUG_DIR = ZARR_DIR.parent / debug_name
+    DEBUG_DIR = ZARR_DIR.parent / (ZARR_DIR.name.replace("_zarr", "_debug"))
     ensure_dir(DEBUG_DIR)
 
-    files = natsorted(glob.glob(str(H5_DIR / "*.hdf5")))
-    if not files:
-        CONSOLE.log(f"[red]No HDF5 files found in {H5_DIR}")
+    h5_files = natsorted(glob.glob(str(H5_DIR / "*.hdf5")))
+    if not h5_files:
+        CONSOLE.log(f"[red]No HDF5 files in {H5_DIR}")
         return
 
-    # Check which episodes are already processed
-    processed_episodes = get_processed_episodes(ZARR_DIR)
-    
-    gsam = None
+    root = zarr.open(ZARR_DIR, mode='a')
+    done = already_done(root)
+    todo = [(i,f) for i,f in enumerate(h5_files) if f"episode_{i:04d}" not in done]
+    if DEBUGGING:
+        todo = todo[:1]
+    if not todo:
+        CONSOLE.log("[green]Everything up-to-date!")
+        return
+
+    gsam = GSAM2() if USE_GSAM else None
     if USE_GSAM:
-        gsam = GSAM2()
-        CONSOLE.log("[blue]GroundedSAM2 processing enabled")
-    else:
-        CONSOLE.log("[yellow]GroundedSAM2 processing disabled - skipping mask and point cloud generation")
-    
-    # Open Zarr in append mode to add new episodes
-    root = zarr.open(ZARR_DIR, mode="a")
+        CONSOLE.log("[blue]GSAM-2 enabled")
 
-    # Count episodes to process
-    episodes_to_process = []
-    for idx, path in enumerate(files):
-        episode_name = f"episode_{idx:04d}"
-        if episode_name not in processed_episodes:
-            episodes_to_process.append((idx, path, episode_name))
-        if DEBUGGING and len(episodes_to_process) >= 1:
-            break
+    for idx, path in tqdm(todo, desc="Episodes"):
+        ep = f"episode_{idx:04d}"
+        CONSOLE.log(f"[cyan]→ {ep}")
 
-    if not episodes_to_process:
-        CONSOLE.log("[green]All episodes already processed!")
-        return
-
-    CONSOLE.log(f"[blue]Processing {len(episodes_to_process)} remaining episodes...")
-
-    # ────────────────────────────────────────────────────────────
-    for idx, path, episode_name in tqdm(episodes_to_process, desc="Episodes"):
-        CONSOLE.log(f"[blue]Processing {episode_name} ({idx+1}/{len(files)})")
-
-        # ―― load episode ―――――――――――――――――――――――――――――――――――――
         try:
             data = hdf5_to_dict(path)
         except Exception as e:
-            CONSOLE.log(f"[red]Error loading {path}: {e}")
+            CONSOLE.log(f"[red]Failed to load {path}: {e}")
             continue
 
-        T = data["pose"].shape[0]
-        rs_rgb = data["rs_color_images"]
-        rs_depth = data["rs_depth_images"]
-        zed_rgb = data["zed_color_images"]
-        zed_depth= data["zed_depth_images"]
+        T = next(iter(data.values())).shape[0]
+        ep_dir = DEBUG_DIR / ep
+        save_first_last_frames(data, ep_dir)
 
-        # ―― combine pose + gripper into 8D pose ――――――――――――――――
-        pose_7d = data["pose"]  # (T, 7)
-        gripper = data["gripper"]  # (T,)
-        pose_10d = combine_pose_gripper(pose_7d, gripper)  # (T, 10)
-        
-        # ―― compute 8D action (last_pose + gripper difference) ―――――
-        last_pose_7d = data["last_pose"]  # (T, 7)
-        last_gripper = data["gripper"]  # (T,)
-        action_10d = combine_pose_gripper(last_pose_7d, last_gripper)  # (T, 10)
+        # pose / action ------------------------------------------------------
+        pose_arr = action_arr = None
+        if "pose" in data and "gripper" in data:
+            pose_arr = combine_pose_gripper(data["pose"], data["gripper"])
+            if "last_pose" in data:
+                action_arr = combine_pose_gripper(data["last_pose"], data["gripper"])
 
-        # episode-specific extras directory
-        ep_dir = DEBUG_DIR / episode_name
-        mask_dir = ep_dir / "masks"
+        # GSAM ---------------------------------------------------------------
+        pcds_arr = None
+        if gsam:
+            rgb_key   = next((k for k in ("zed_rgb","zed_color","rs_side_rgb") if k in data), None)
+            depth_key = "zed_depth" if rgb_key and "zed" in rgb_key and "zed_depth" in data else None
+            if rgb_key:
+                pcds = gsam.process(data[rgb_key], data.get(depth_key), ep_dir/"masks")
+                if pcds:
+                    pcds_arr = np.stack(pcds, axis=0)
 
-        try:
+        # write to Zarr ------------------------------------------------------
+        if ep in root:
+            del root[ep]
+        g = root.create_group(ep)
 
-            if USE_GSAM:
-                # ―― GSAM → masks → point clouds ―――――――――――――――――――――
-                pcds = gsam.process_episode(zed_rgb, zed_depth, mask_dump_dir=mask_dir)
-                pcds_arr = np.stack(pcds, axis=0)  # (T, K, 6)
-            else:
-                pcds_arr = None
+        for key, arr in data.items():
+            if key in ("pose","gripper","last_pose") and pose_arr is not None:
+                continue
+            chunks = (1,*arr.shape[1:]) if is_image_data(key,arr) else None
+            g.array(key, arr, chunks=chunks, dtype=arr.dtype)
 
-            # ―― save first / last frames ――――――――――――――――――――――
-            dump_first_last_frames(rs_rgb, rs_depth, zed_rgb, zed_depth, ep_dir)
+        if pose_arr is not None:
+            g.array("pose", pose_arr, dtype=np.float32)
+            fmt = "x,y,z,6d,grip" if ROTATION_TRANSFORMER_AVAILABLE else "x,y,z,quat,grip"
+            g.attrs["pose_format"] = fmt
+        if action_arr is not None:
+            g.array("action", action_arr, dtype=np.float32)
+        if pcds_arr is not None:
+            g.array("point_cloud", pcds_arr, dtype=np.float32, chunks=(1,*pcds_arr.shape[1:]))
 
-            # ―― store episode to Zarr ―――――――――――――――――――――――――
-            # Remove existing group if it exists (in case of partial processing)
-            if episode_name in root:
-                del root[episode_name]
-            
-            grp = root.create_group(episode_name)
-            grp.array("rs_color_images",    rs_rgb,    dtype=np.uint8,  chunks=(1, *rs_rgb.shape[1:]))
-            grp.array("rs_depth_images",  rs_depth,  dtype=np.float32,chunks=(1, *rs_depth.shape[1:]))
-            grp.array("zed_color_images",   zed_rgb,   dtype=np.uint8,  chunks=(1, *zed_rgb.shape[1:]))
-            grp.array("zed_depth_images", zed_depth, dtype=np.float32,chunks=(1, *zed_depth.shape[1:]))
+        g.attrs["length"]        = T
+        g.attrs["original_keys"] = list(data.keys())
 
-            if USE_GSAM and pcds_arr is not None:
-                grp.array("zed_pcd", pcds_arr, dtype=np.float32, chunks=(1, *pcds_arr.shape[1:]))
+        CONSOLE.log(f"[green]✓ {ep} saved  ({len(data)} datasets)")
 
-            grp.array("pose",      pose_10d,   dtype=np.float32)  # Now 10D: [x,y,z,6d_pose,gripper]
-            grp.array("action",    action_10d, dtype=np.float32)  # Now 10D: action difference
-            grp.attrs["length"] = T
-            grp.attrs["pose_format"] = "x,y,z,6d_pose,gripper"  # Document the format
+    CONSOLE.log(f"[green]Finished – processed {len(todo)} new episode(s)")
 
-            CONSOLE.log(f"[green]✓ Completed {episode_name} with 10D pose (7D + 6D + gripper)")
-            
-            # Reset GSAM state for next episode to avoid memory issues
-            if USE_GSAM and gsam is not None:
-                gsam.util.reset()
-            
-        except Exception as e:
-            CONSOLE.log(f"[red]Error processing {episode_name}: {e}")
-            # Clean up partial episode data
-            if episode_name in root:
-                del root[episode_name]
-            continue
-
-    processed_count = len(episodes_to_process)
-    total_count = 1 if DEBUGGING else len(files)
-    CONSOLE.log(f"[green]Finished.[/] Processed {processed_count} new episodes")
-    CONSOLE.log(f"[green]Total episodes in Zarr: {len(root.keys())}/{total_count}")
-    CONSOLE.log(f"[green]Extra masks & frames saved under {DEBUG_DIR}")
-    CONSOLE.log(f"[blue]NOTE: Pose is now 10D format: [x, y, z, 6d_pose, gripper]")
-
-# ────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     main()

@@ -69,11 +69,11 @@ class Spacemouse2Xarm(Node):
             orient='horizontal',
             label='Gripper Open/Close',
             command=self.update_gripper,
-            length=1300,  # Longer slider
-            width=70,     # Thicker slider
-            font=('Arial', 14, 'bold'),  # Larger font
+            length=1700,  # Longer slider
+            width=100,     # Thicker slider
+            font=('Arial', 16, 'bold'),  # Larger font
             troughcolor='#E0E0E0',  # Light gray background
-            sliderlength=60  # Larger slider handle
+            sliderlength=80  # Larger slider handle
         )
         self.slider.pack(fill=tk.X, expand=True, padx=20, pady=50)  # More padding
         self.slider.set(0)
@@ -97,8 +97,8 @@ class Spacemouse2Xarm(Node):
             self.arm.set_mode(0)
             self.arm.set_state(0)
             self.arm.set_position(
-                x=166.9, y=1.9, z=230.8,
-                roll=179.1, pitch=0, yaw=1.2,
+                x=166.9, y=2.1, z=230.5,
+                roll=179.2, pitch=0.1, yaw=1.3,
                 speed=100, is_radian=False, wait=True
             )
             self.arm.motion_enable(enable=True)

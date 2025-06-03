@@ -8,7 +8,7 @@ def check_hdf5_structure():
     """Check the data structure of the first episode HDF5 file."""
     
     # Hardcoded path to the first episode
-    data_path = os.path.join(os.getcwd(), "demo_data", "episode_0.hdf5")
+    data_path = os.path.join(os.getcwd(), "data", "2d_strawberry_baseline", "10_hz_3_cam_100_demos", "episode_0.hdf5")
     
     if not os.path.exists(data_path):
         print(f"Error: File not found at {data_path}")
@@ -40,8 +40,10 @@ def check_hdf5_structure():
                 elif len(dataset.shape) == 4:
                     print(f"  Image stack: {dataset.shape[0]} images, {dataset.shape[2]}x{dataset.shape[3]} pixels, {dataset.shape[1]} channels")
                 elif len(dataset.shape) == 3:
-                    dims = "x".join(map(str, dataset.shape[1:]))
-                    print(f"  3-D stack: {dataset.shape[0]} samples, each {dims}")
+                    if dataset.shape[2] > dataset.shape[1]:
+                        print(f"  Depth stack: {dataset.shape[0]} images, {dataset.shape[2]}x{dataset.shape[3]} pixels")
+                    else:
+                        print(f"  Data stack: {dataset.shape[0]} samples x {dataset.shape[1]}x{dataset.shape[2]}")
                 
                 # Show compression info if available
                 if dataset.compression:

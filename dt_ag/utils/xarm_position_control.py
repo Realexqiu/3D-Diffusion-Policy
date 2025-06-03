@@ -149,8 +149,8 @@ class XArmPositionController(Node):
             try:
                 # Reset position (in mm and degrees)
                 code = self.arm.set_position(
-                    x=166.9, y=1.9, z=230.8, 
-                    roll=179.1, pitch=0, yaw=1.2, 
+                    x=166.9, y=2.1, z=230.5, 
+                    roll=179.2, pitch=0.1, yaw=1.3, 
                     speed=100, is_radian=False, wait=True
                 )
                 
