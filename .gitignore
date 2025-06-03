@@ -18,6 +18,7 @@ dexdeform_folding_traj.pkl
 trajectory_video.gif
 trajectory_video.mp4
 *.npy
+*.hdf5
 isaacgym/
 *.html
 nohup.out
