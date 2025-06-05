@@ -25,6 +25,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import CompressedImage
 import message_filters
 from rclpy.executors import MultiThreadedExecutor
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+DEBUG_DIR = SCRIPT_DIR / "2d_dp_debug_baseline_beast"
 gendp_path = '/home/alex/Documents/DT-Diffusion-Policy/gendp/gendp'
 
 if gendp_path not in sys.path:
@@ -62,7 +64,6 @@ class PolicyNode3D(Node):
         
         # Conditionally subscribe to cameras based on policy requirements
         if self.has_zed_rgb:
-            # self.zed_rgb_sub = message_filters.Subscriber(self, Image, '/zed_image/rgb', qos_profile=sensor_qos)
             self.zed_rgb_compressed_sub = message_filters.Subscriber(self, CompressedImage, '/zed_image/rgb/compressed', qos_profile=sensor_qos)
             subscribers.append(self.zed_rgb_compressed_sub)
 
@@ -71,7 +72,6 @@ class PolicyNode3D(Node):
             subscribers.append(self.zed_depth_sub)
             
         if self.has_rs_rgb:
-            # self.rs_color_sub = message_filters.Subscriber(self, Image, '/camera/realsense_camera/color/image_raw', qos_profile=sensor_qos)
             self.rs_color_compressed_sub = message_filters.Subscriber(self, CompressedImage, '/rs_side/rs_side/color/image_raw/compressed', qos_profile=sensor_qos)
             subscribers.append(self.rs_color_compressed_sub)
 
@@ -360,7 +360,15 @@ class PolicyNode3D(Node):
             zed_rgb_img = self.center_crop_rgb_frames(zed_rgb_img, self.ZED_CROP_SIZE)
 
         # apply matt crop
-        zed_rgb_img = zed_rgb_img[:, :400, :]
+        zed_rgb_img = zed_rgb_img[220:340, 70:320, :]
+
+
+#         ENABLE_CENTER_CROP_RS = True  # Set to False to disable cropping
+# ENABLE_CENTER_CROP_ZED = True
+# RS_WIDTH_RANGE = (0, 640)
+# RS_HEIGHT_RANGE = (160, 320)
+# ZED_WIDTH_RANGE = (70, 320)
+# ZED_HEIGHT_RANGE = (220, 340)
 
     
         zed_rgb_img = self.resize_for_policy(zed_rgb_img, 'zed_rgb')
@@ -378,8 +386,12 @@ class PolicyNode3D(Node):
         # swap bgr and rgb
         rs_img = rs_img[:, :, ::-1]
 
-        if self.center_crop:
-            rs_img = self.center_crop_rgb_frames(rs_img, self.RS_CROP_SIZE)
+        # if self.center_crop:
+        #     rs_img = self.center_crop_rgb_frames(rs_img, self.RS_CROP_SIZE)
+
+        # apply mat ctrop
+        rs_img = rs_img[160:320, :640, :]
+
         rs_img = self.resize_for_policy(rs_img, 'rs_side_rgb')
 
         self.rs_color_buffer.append((rs_img, time.monotonic() - self.start_time))
@@ -531,7 +543,7 @@ def inference_loop(model_path, shared_obs, action_queue, action_horizon = 4, dev
         prep_time = time.time() - prep_start_time
 
         # Save the most recent observation for debugging
-        save_data(obs)
+        save_data(obs, debug_dir=DEBUG_DIR)
 
         # Predict an action-horizon batch
         inference_start_time = time.time()
@@ -585,7 +597,7 @@ def inference_loop(model_path, shared_obs, action_queue, action_horizon = 4, dev
             action_queue.put((act, time.monotonic() - start_time))
         queue_time = time.time() - queue_start_time
 
-        time.sleep(.05)
+        time.sleep(.00)
 
 
         total_loop_time = time.time() - loop_start_time
@@ -714,8 +726,8 @@ def save_data(obs_dict=None, debug_dir=Path("../inference/2d_dp_debug")):
         return
         
     # Save the most recent observation (last in the horizon)
-    if "rs_color_images" in obs_dict and obs_dict["rs_color_images"] is not None:
-        rs_tensor = obs_dict["rs_color_images"]
+    if "rs_side_rgb" in obs_dict and obs_dict["rs_side_rgb"] is not None:
+        rs_tensor = obs_dict["rs_side_rgb"]
         if isinstance(rs_tensor, torch.Tensor):
             # Get the most recent frame: [1, T, C, H, W] -> [C, H, W]
             rs_rgb = rs_tensor[0, -1].cpu().numpy()  # Last frame in horizon
@@ -725,7 +737,7 @@ def save_data(obs_dict=None, debug_dir=Path("../inference/2d_dp_debug")):
             # Convert RGB back to BGR for OpenCV
             rs_img = cv2.cvtColor(rs_img, cv2.COLOR_RGB2BGR)
 
-            cv2.imwrite(str(debug_dir/f"rs_rgb.jpg"), rs_img)
+            cv2.imwrite(str(debug_dir/f"rs_side_rgb.jpg"), rs_img)
     
     # Save ZED RGB if available
     if "zed_rgb" in obs_dict and obs_dict["zed_rgb"] is not None:
@@ -762,7 +774,7 @@ def main(args=None):
     start_time = time.monotonic()
 
     # Model path
-    model_path = '/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/models/working_models/baseline_zed_rs_side_large_unet_2000_epochs.ckpt'
+    model_path = '/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/models/extreme_cropping_2000.ckpt'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     shape_meta = load_shape_meta(model_path)
 

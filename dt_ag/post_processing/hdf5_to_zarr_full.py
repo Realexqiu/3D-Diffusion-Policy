@@ -28,7 +28,7 @@ try:
     GSAM_AVAILABLE = True
 except ImportError:
     GSAM_AVAILABLE = False
-    print("Warning: GSAM not available – mask/PCD generation disabled.")
+    print("Warning: GSAM not available - mask/PCD generation disabled.")
 
 try:
     from rotation_transformer import RotationTransformer
@@ -36,7 +36,7 @@ try:
     ROTATION_TRANSFORMER_AVAILABLE = True
 except ImportError:
     ROTATION_TRANSFORMER_AVAILABLE = False
-    print("Warning: rotation_transformer not available – pose kept as quaternion.")
+    print("Warning: rotation_transformer not available - pose kept as quaternion.")
 
 DEBUGGING  = False       # only convert episode_0000 when True
 USE_GSAM   = False and GSAM_AVAILABLE
@@ -46,10 +46,7 @@ CONSOLE    = Console()
 #  Dataset type helpers
 # ---------------------------------------------------------------------------
 IMAGE_KEYS = {
-    'rgb', 'color', 'image',          # generic
-    'rs_side_rgb',                    # RealSense side cam   ← added
-    'zed_rgb', 'zed_color',
-    'dt_left', 'dt_right'
+    'rgb', 'color', 'image', 'rs_front_rgb', 'rs_side_rgb', 'zed_rgb', 'dt_left', 'dt_right'
 }
 DEPTH_KEYS = {'depth', 'zed_depth'}
 POSE_KEYS  = {'pose', 'last_pose'}
@@ -166,8 +163,8 @@ class GSAM2:
 #  Main conversion
 # ---------------------------------------------------------------------------
 def main():
-    H5_DIR   = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_dt/10_hz_dt_100")
-    ZARR_DIR = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_dt/10_hz_dt_100_zarr")
+    H5_DIR   = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_baseline/4_cam_baseline")
+    ZARR_DIR = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_baseline/4_cam_baseline_zarr")
     ZARR_DIR.mkdir(parents=True, exist_ok=True)
 
     DEBUG_DIR = ZARR_DIR.parent / (ZARR_DIR.name.replace("_zarr", "_debug"))
@@ -215,7 +212,7 @@ def main():
         # GSAM ---------------------------------------------------------------
         pcds_arr = None
         if gsam:
-            rgb_key   = next((k for k in ("zed_rgb","zed_color","rs_side_rgb") if k in data), None)
+            rgb_key   = next((k for k in ("zed_rgb", "rs_front_rgb", "rs_side_rgb") if k in data), None)
             depth_key = "zed_depth" if rgb_key and "zed" in rgb_key and "zed_depth" in data else None
             if rgb_key:
                 pcds = gsam.process(data[rgb_key], data.get(depth_key), ep_dir/"masks")
@@ -228,7 +225,7 @@ def main():
         g = root.create_group(ep)
 
         for key, arr in data.items():
-            if key in ("pose","gripper","last_pose") and pose_arr is not None:
+            if key in ("pose", "gripper", "last_pose") and pose_arr is not None:
                 continue
             chunks = (1,*arr.shape[1:]) if is_image_data(key,arr) else None
             g.array(key, arr, chunks=chunks, dtype=arr.dtype)
@@ -247,7 +244,7 @@ def main():
 
         CONSOLE.log(f"[green]✓ {ep} saved  ({len(data)} datasets)")
 
-    CONSOLE.log(f"[green]Finished – processed {len(todo)} new episode(s)")
+    CONSOLE.log(f"[green]Finished - processed {len(todo)} new episode(s)")
 
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":

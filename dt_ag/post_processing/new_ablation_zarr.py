@@ -19,35 +19,40 @@ import numpy as np
 import zarr
 from rich.console import Console
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+from rich.table import Table
 
 # ────────────────────────────────────────────────────────────────
 #  Configuration
 # ────────────────────────────────────────────────────────────────
 # Input Zarr dataset path
-INPUT_ZARR_DIR = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_baseline/10_hz_baseline_100_zarr")
+INPUT_ZARR_DIR = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_baseline/4_cam_baseline_zarr")
 
 # Output Zarr dataset path
-OUTPUT_ZARR_DIR = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_baseline/10_hz_baseline_100_zarr_no_crop")
+OUTPUT_ZARR_DIR = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_baseline/4_cam_baseline_zarr_rs_side+front_no_crop")
 
 # Resize settings
 ENABLE_RESIZE = True  # Set to False to keep original resolution
 TARGET_WIDTH = 220    # Target width for resizing
-TARGET_HEIGHT = 180   # Target height for resizing
+TARGET_HEIGHT = 160   # Target height for resizing
 
-# Center crop settings
-ENABLE_CENTER_CROP_RS = False  # Set to False to disable center cropping
-RS_CROP_WIDTH = 850      # Target width for center crop
-RS_CROP_HEIGHT = 420     # Target height for center crop
-ENABLE_CENTER_CROP_ZED = False
-ZED_CROP_WIDTH = 320
-ZED_CROP_HEIGHT = 360
+# Crop settings
+CROP_RS_FRONT = False  # Set to False to disable cropping
+CROP_RS_SIDE = False
+CROP_RS_WRIST = False
+CROP_ZED = False
 
-# Off-center crop settings (set to None for center crop, or specify offset)
-# Positive values move crop towards bottom-right, negative towards top-left
-RS_CROP_OFFSET_X = None    # Horizontal offset from center (None for center crop)
-RS_CROP_OFFSET_Y = None    # Vertical offset from center (None for center crop)
-ZED_CROP_OFFSET_X = -300   # For ZED camera
-ZED_CROP_OFFSET_Y = None   # For ZED camera
+RS_FRONT_W_RANGE = (0, 640)
+RS_FRONT_H_RANGE = (160, 320)
+
+RS_SIDE_W_RANGE = (0, 640)
+RS_SIDE_H_RANGE = (160, 320)
+
+RS_WRIST_W_RANGE = (0, 640)
+RS_WRIST_H_RANGE = (160, 320)
+
+ZED_W_RANGE = (70, 320)
+ZED_H_RANGE = (220, 340)
 
 # Color jitter settings
 ENABLE_COLOR_JITTER = False  # Set to False to disable color jitter
@@ -180,23 +185,20 @@ def resize_rgb_frames(rgb_frames: np.ndarray, target_size: Tuple[int,int]) -> np
     return out_hwc.transpose(0, 3, 1, 2)    # → (T, C, H, W)
 
 def crop_rgb_frames(rgb_frames: np.ndarray, 
-                   crop_size: Tuple[int,int],
-                   offset_x: Optional[int] = None,
-                   offset_y: Optional[int] = None) -> np.ndarray:
+                   y_range: Tuple[int,int],
+                   x_range: Tuple[int,int]) -> np.ndarray:
     """
     Crop RGB frames to target size with optional offset, returning (T, C, H, W).
     
     Args:
         rgb_frames: Input frames
-        crop_size: (width, height) of crop
-        offset_x: Horizontal offset from center (None for center crop)
-        offset_y: Vertical offset from center (None for center crop)
+        y_range: (start, end) of crop in y-direction
+        x_range: (start, end) of crop in x-direction
 
     Accepts either:
       - HWC: (T, H, W, C)
       - CHW: (T, C, H, W)
     """
-    crop_w, crop_h = crop_size
 
     # Step 1: get everything into HWC-per-frame
     if rgb_frames.ndim == 4 and rgb_frames.shape[-1] in (1,3):
@@ -210,34 +212,8 @@ def crop_rgb_frames(rgb_frames: np.ndarray,
 
     T, H, W, C = hwc.shape
     
-    # Check if crop size is valid
-    if crop_h > H or crop_w > W:
-        raise ValueError(f"Crop size ({crop_h}, {crop_w}) larger than image size ({H}, {W})")
-    
-    # Calculate crop coordinates
-    center_y = H // 2
-    center_x = W // 2
-    
-    # Apply offsets (default to center crop if None)
-    if offset_x is None:
-        start_x = center_x - crop_w // 2
-    else:
-        start_x = center_x - crop_w // 2 + offset_x
-        
-    if offset_y is None:
-        start_y = center_y - crop_h // 2
-    else:
-        start_y = center_y - crop_h // 2 + offset_y
-    
-    # Ensure crop stays within image bounds
-    start_x = max(0, min(start_x, W - crop_w))
-    start_y = max(0, min(start_y, H - crop_h))
-    
-    end_y = start_y + crop_h
-    end_x = start_x + crop_w
-    
     # Step 2: crop each frame
-    cropped_hwc = hwc[:, start_y:end_y, start_x:end_x, :]
+    cropped_hwc = hwc[:, x_range[0]:x_range[1], y_range[0]:y_range[1], :]
     
     # Step 3: convert back to CHW-per-frame
     return cropped_hwc.transpose(0, 3, 1, 2)    # → (T, C, H, W)
@@ -247,16 +223,236 @@ def get_episode_names(zarr_root) -> list:
     episode_names = [key for key in zarr_root.keys() if key.startswith("episode_")]
     return sorted(episode_names)
 
-def check_required_arrays(episode_group, episode_name: str) -> bool:
+def check_required_arrays(episode_group, desired_data_names: list, episode_name: str) -> bool:
     """Check if episode has all required arrays."""
-    required_arrays = ["rs_side_rgb", "zed_rgb", "pose", "action"]
-    
-    for array_name in required_arrays:
+    for array_name in desired_data_names:
         if array_name not in episode_group:
             CONSOLE.log(f"[yellow]Episode {episode_name} missing {array_name}, skipping")
             return False
     
     return True
+
+def inspect_zarr_dataset(zarr_path: Path, episode_idx: int = 0, visualize: bool = True) -> None:
+    """
+    Inspect a single episode from the Zarr dataset to understand data shapes.
+    
+    Args:
+        zarr_path: Path to the Zarr dataset
+        episode_idx: Which episode to inspect (default: 0)
+        visualize: Whether to create visualizations (default: True)
+    """
+    
+    if not zarr_path.exists():
+        CONSOLE.log(f"[red]Zarr path does not exist: {zarr_path}")
+        return
+    
+    try:
+        root = zarr.open(zarr_path, mode="r")
+        
+        # List all available episodes
+        episodes = [key for key in root.keys() if key.startswith("episode_")]
+        episodes.sort()
+        
+        if not episodes:
+            CONSOLE.log("[red]No episodes found in Zarr dataset!")
+            return
+        
+        CONSOLE.log(f"[green]Found {len(episodes)} episodes in dataset")
+        CONSOLE.log(f"[blue]Episodes: {episodes[0]} to {episodes[-1]}")
+        
+        # Select episode to inspect
+        if episode_idx >= len(episodes):
+            CONSOLE.log(f"[yellow]Episode index {episode_idx} out of range, using episode 0")
+            episode_idx = 0
+        
+        episode_name = episodes[episode_idx]
+        episode_group = root[episode_name]
+        
+        CONSOLE.log(f"\n[bold blue]Inspecting {episode_name}:")
+        
+        # Create a table for the results
+        table = Table(title=f"Data Shapes in {episode_name}")
+        table.add_column("Array Name", style="cyan", no_wrap=True)
+        table.add_column("Shape", style="magenta")
+        table.add_column("Data Type", style="green")
+        table.add_column("Min Value", style="yellow")
+        table.add_column("Max Value", style="yellow")
+        table.add_column("Notes", style="white")
+        
+        # Inspect each array in the episode
+        for array_name in sorted(episode_group.keys()):
+            array = episode_group[array_name]
+            
+            # Get basic info
+            shape_str = str(array.shape)
+            dtype_str = str(array.dtype)
+            
+            # Calculate min/max for small arrays or sample for large ones
+            try:
+                if array.size < 1000000:  # For reasonably sized arrays
+                    min_val = np.min(array[:])
+                    max_val = np.max(array[:])
+                else:  # For very large arrays, sample
+                    sample = array[:10] if len(array.shape) > 0 else array[:]
+                    min_val = np.min(sample)
+                    max_val = np.max(sample)
+                min_str = f"{min_val:.3f}" if isinstance(min_val, (float, np.floating)) else str(min_val)
+                max_str = f"{max_val:.3f}" if isinstance(max_val, (float, np.floating)) else str(max_val)
+            except Exception as e:
+                min_str = "N/A"
+                max_str = "N/A"
+            
+            # Add notes based on array name and properties
+            notes = ""
+            if array_name in ['rs_side_rgb', 'rs_front_rgb', 'rs_color_images']:
+                notes = "RGB images"
+            elif array_name in ['rs_depth', 'zed_depth']:
+                notes = "Depth images"
+            elif array_name == 'zed_pcd':
+                notes = "Point clouds (T, N_points, 6) - [x,y,z,r,g,b]"
+            elif array_name in ['agent_pos', 'pose']:
+                notes = "Robot poses (T, 7) - [x,y,z,qw,qx,qy,qz]"
+            elif array_name == 'action':
+                notes = "Actions (T, 7) - pose deltas"
+            
+            table.add_row(array_name, shape_str, dtype_str, min_str, max_str, notes)
+        
+        CONSOLE.print(table)
+        
+        # Print episode attributes
+        if hasattr(episode_group, 'attrs') and episode_group.attrs:
+            CONSOLE.log(f"\n[bold blue]Episode Attributes:")
+            for attr_name, attr_value in episode_group.attrs.items():
+                CONSOLE.log(f"  {attr_name}: {attr_value}")
+        
+        # Visualize first frames if requested
+        if visualize:
+            CONSOLE.log(f"\n[bold green]Creating visualizations...")
+            visualize_first_frames(episode_group, episode_name)
+        
+    except Exception as e:
+        CONSOLE.log(f"[red]Error inspecting Zarr dataset: {e}")
+        import traceback
+        traceback.print_exc()
+
+def visualize_first_frames(episode_group, episode_name: str) -> None:
+    """
+    Visualize the first frame of each image array in the episode.
+    
+    Args:
+        episode_group: Zarr episode group containing the arrays
+        episode_name: Name of the episode for display purposes
+    """
+    # Find all image arrays
+    image_arrays = []
+    for array_name in episode_group.keys():
+        array = episode_group[array_name]
+        # Check if this looks like an image array (3D or 4D with reasonable dimensions)
+        if len(array.shape) >= 3:
+            # Common image array patterns
+            if any(keyword in array_name.lower() for keyword in ['rgb', 'color', 'image', 'depth']):
+                image_arrays.append(array_name)
+            # Also check for arrays that have image-like dimensions
+            elif len(array.shape) == 4 and array.shape[-1] in [1, 3, 4]:  # (T, H, W, C)
+                image_arrays.append(array_name)
+            elif len(array.shape) == 4 and array.shape[1] in [1, 3, 4]:   # (T, C, H, W)
+                image_arrays.append(array_name)
+            elif len(array.shape) == 3 and min(array.shape[1:]) > 50:     # (T, H, W) - likely depth
+                image_arrays.append(array_name)
+    
+    if not image_arrays:
+        CONSOLE.log("[yellow]No image arrays found to visualize")
+        return
+    
+    CONSOLE.log(f"[green]Found {len(image_arrays)} image arrays to visualize: {image_arrays}")
+    
+    # Set up the plot
+    n_images = len(image_arrays)
+    fig, axes = plt.subplots(1, n_images, figsize=(5*n_images, 5))
+    if n_images == 1:
+        axes = [axes]  # Make it iterable
+    
+    fig.suptitle(f'First Frame Visualization - {episode_name}', fontsize=16)
+    
+    for idx, array_name in enumerate(image_arrays):
+        array = episode_group[array_name]
+        ax = axes[idx]
+        
+        try:
+            # Get the first frame
+            first_frame = array[0]  # Shape: (H, W, C) or (C, H, W) or (H, W)
+            
+            # Handle different array formats
+            if len(first_frame.shape) == 3:
+                if first_frame.shape[-1] in [1, 3, 4]:  # (H, W, C) format
+                    display_image = first_frame
+                    if first_frame.shape[-1] == 1:  # Grayscale
+                        display_image = first_frame.squeeze(-1)
+                elif first_frame.shape[0] in [1, 3, 4]:  # (C, H, W) format
+                    if first_frame.shape[0] == 1:  # Grayscale
+                        display_image = first_frame[0]
+                    else:  # RGB
+                        display_image = first_frame.transpose(1, 2, 0)  # Convert to (H, W, C)
+                else:
+                    # Assume it's some other 3D format, take first slice
+                    display_image = first_frame[:, :, 0]
+            elif len(first_frame.shape) == 2:  # (H, W) - likely depth or grayscale
+                display_image = first_frame
+            else:
+                CONSOLE.log(f"[yellow]Cannot visualize {array_name} with shape {first_frame.shape}")
+                continue
+            
+            # Handle different data types and ranges
+            if 'depth' in array_name.lower():
+                # For depth images, use a colormap and handle potential inf/nan values
+                display_image = np.nan_to_num(display_image, nan=0, posinf=0, neginf=0)
+                im = ax.imshow(display_image, cmap='viridis')
+                plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            else:
+                # For RGB/color images
+                if display_image.dtype == np.uint8:
+                    # Already in 0-255 range
+                    im = ax.imshow(display_image)
+                elif display_image.max() <= 1.0:
+                    # Assuming 0-1 range
+                    im = ax.imshow(display_image)
+                else:
+                    # Scale to 0-255 if needed
+                    display_image = (display_image - display_image.min()) / (display_image.max() - display_image.min())
+                    im = ax.imshow(display_image)
+            
+            # Set title and info
+            shape_str = f"{array.shape}"
+            dtype_str = f"{array.dtype}"
+            ax.set_title(f'{array_name}\nShape: {shape_str}\nDType: {dtype_str}', fontsize=10)
+            ax.axis('off')
+            
+            # Add value range info
+            if len(first_frame.shape) <= 3:
+                min_val = np.min(first_frame)
+                max_val = np.max(first_frame)
+                mean_val = np.mean(first_frame)
+                ax.text(0.02, 0.98, f'Range: [{min_val:.2f}, {max_val:.2f}]\nMean: {mean_val:.2f}', 
+                       transform=ax.transAxes, verticalalignment='top', 
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
+                       fontsize=8)
+            
+        except Exception as e:
+            CONSOLE.log(f"[red]Error visualizing {array_name}: {e}")
+            ax.text(0.5, 0.5, f'Error visualizing\n{array_name}\n{str(e)}', 
+                   transform=ax.transAxes, ha='center', va='center')
+            ax.set_title(array_name)
+            ax.axis('off')
+    
+    plt.tight_layout()
+    
+    # Save the visualization
+    output_path = Path("first_frame_visualization.png")
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    CONSOLE.log(f"[green]Visualization saved to: {output_path}")
+    
+    # Show the plot
+    plt.show()
 
 # ────────────────────────────────────────────────────────────────
 #  Main conversion routine
@@ -301,63 +497,73 @@ def main() -> None:
     for episode_name in tqdm(episode_names, desc="Processing episodes"):
         try:
             CONSOLE.log(f"[blue]Processing {episode_name}")
-            input_episode = input_root[episode_name]
-            if not check_required_arrays(input_episode, episode_name):
-                continue
             
-            # Load required data
-            rs_side_rgb = input_episode["rs_side_rgb"][:]
-            zed_rgb     = input_episode["zed_rgb"][:]
-            pose        = input_episode["pose"][:]
-            action      = input_episode["action"][:]
-            T = rs_side_rgb.shape[0]
+            # Create an array of names of data that we want for this ablation and load data
+            desired_data_names = ['rs_side_rgb', 'rs_front_rgb', 'pose', 'action']
+            input_episode = input_root[episode_name]
+            desired_data = {name: input_episode[name][:] for name in desired_data_names}
+            T = desired_data['pose'].shape[0]
+
+            # Check if episode has all required arrays
+            if not check_required_arrays(input_episode, desired_data_names, episode_name):
+                continue
 
             # Apply cropping if enabled
-            if ENABLE_CENTER_CROP_RS:
-                crop_type = "center" if RS_CROP_OFFSET_X is None and RS_CROP_OFFSET_Y is None else "off-center"
-                CONSOLE.log(f"[blue]Applying {crop_type} crop to RS frames from {rs_side_rgb.shape[1:3]} to ({RS_CROP_HEIGHT}, {RS_CROP_WIDTH})")
-                rs_side_rgb = crop_rgb_frames(rs_side_rgb, (RS_CROP_WIDTH, RS_CROP_HEIGHT),
-                                              RS_CROP_OFFSET_X, RS_CROP_OFFSET_Y)
+            if CROP_RS_FRONT and 'rs_front_rgb' in desired_data:
+                CONSOLE.log(f"[blue]Applying center crop to RS frames from {desired_data['rs_front_rgb'].shape[1:3]} to ({RS_FRONT_W_RANGE}, {RS_FRONT_H_RANGE})")
+                desired_data['rs_front_rgb'] = crop_rgb_frames(desired_data['rs_front_rgb'], RS_FRONT_W_RANGE, RS_FRONT_H_RANGE)
 
-            if ENABLE_CENTER_CROP_ZED:
-                crop_type = "center" if ZED_CROP_OFFSET_X is None and ZED_CROP_OFFSET_Y is None else "off-center"
-                CONSOLE.log(f"[blue]Applying {crop_type} crop to ZED frames from {zed_rgb.shape[1:3]} to ({ZED_CROP_HEIGHT}, {ZED_CROP_WIDTH})")
-                zed_rgb = crop_rgb_frames(zed_rgb, (ZED_CROP_WIDTH, ZED_CROP_HEIGHT),
-                                          ZED_CROP_OFFSET_X, ZED_CROP_OFFSET_Y)
+            if CROP_RS_SIDE and 'rs_side_rgb' in desired_data:
+                CONSOLE.log(f"[blue]Applying center crop to RS frames from {desired_data['rs_side_rgb'].shape[1:3]} to ({RS_SIDE_W_RANGE}, {RS_SIDE_H_RANGE})")
+                desired_data['rs_side_rgb'] = crop_rgb_frames(desired_data['rs_side_rgb'], RS_SIDE_W_RANGE, RS_SIDE_H_RANGE)
 
-            # Apply color jitter if enabled
-            if ENABLE_COLOR_JITTER:
-                CONSOLE.log(f"[blue]Applying color jitter (brightness={COLOR_JITTER_BRIGHTNESS}, contrast={COLOR_JITTER_CONTRAST}, saturation={COLOR_JITTER_SATURATION}, hue={COLOR_JITTER_HUE})")
-                rs_side_rgb = apply_color_jitter(rs_side_rgb,
-                                                 COLOR_JITTER_BRIGHTNESS,
-                                                 COLOR_JITTER_CONTRAST,
-                                                 COLOR_JITTER_SATURATION,
-                                                 COLOR_JITTER_HUE)
-                zed_rgb = apply_color_jitter(zed_rgb,
-                                             COLOR_JITTER_BRIGHTNESS,
-                                             COLOR_JITTER_CONTRAST,
-                                             COLOR_JITTER_SATURATION,
-                                             COLOR_JITTER_HUE)
+            if CROP_RS_WRIST and 'rs_wrist_rgb' in desired_data:
+                CONSOLE.log(f"[blue]Applying center crop to RS frames from {desired_data['rs_wrist_rgb'].shape[1:3]} to ({RS_WRIST_W_RANGE}, {RS_WRIST_H_RANGE})")
+                desired_data['rs_wrist_rgb'] = crop_rgb_frames(desired_data['rs_wrist_rgb'], RS_WRIST_W_RANGE, RS_WRIST_H_RANGE)
+
+            if CROP_ZED and 'zed_rgb' in desired_data:
+                CONSOLE.log(f"[blue]Applying center crop to ZED frames from {desired_data['zed_rgb'].shape[1:3]} to ({ZED_W_RANGE}, {ZED_H_RANGE})")
+                desired_data['zed_rgb'] = crop_rgb_frames(desired_data['zed_rgb'], ZED_W_RANGE, ZED_H_RANGE)
+
+            # # Apply color jitter if enabled
+            # if ENABLE_COLOR_JITTER:
+            #     CONSOLE.log(f"[blue]Applying color jitter (brightness={COLOR_JITTER_BRIGHTNESS}, contrast={COLOR_JITTER_CONTRAST}, saturation={COLOR_JITTER_SATURATION}, hue={COLOR_JITTER_HUE})")
+            #     desired_data["rs_side_rgb"] = apply_color_jitter(desired_data["rs_side_rgb"],
+            #                                      COLOR_JITTER_BRIGHTNESS,
+            #                                      COLOR_JITTER_CONTRAST,
+            #                                      COLOR_JITTER_SATURATION,
+            #                                      COLOR_JITTER_HUE)
+            #     desired_data["zed_rgb"] = apply_color_jitter(desired_data["zed_rgb"],
+            #                                  COLOR_JITTER_BRIGHTNESS,
+            #                                  COLOR_JITTER_CONTRAST,
+            #                                  COLOR_JITTER_SATURATION,
+            #                                  COLOR_JITTER_HUE)
 
             # Resize RGB frames if enabled
             if ENABLE_RESIZE:
-                CONSOLE.log(f"[blue]Resizing RGB frames from {rs_side_rgb.shape[1:3]} to ({TARGET_HEIGHT}, {TARGET_WIDTH})")
-                rs_side_rgb = resize_rgb_frames(rs_side_rgb, (TARGET_WIDTH, TARGET_HEIGHT))
-                zed_rgb = resize_rgb_frames(zed_rgb, (TARGET_WIDTH, TARGET_HEIGHT))
+                CONSOLE.log(f"[blue]Resizing RGB frames from {desired_data['rs_side_rgb'].shape[1:3]} to ({TARGET_WIDTH}, {TARGET_HEIGHT})")
+                if 'rs_side_rgb' in desired_data:
+                    desired_data['rs_side_rgb'] = resize_rgb_frames(desired_data['rs_side_rgb'], (TARGET_WIDTH, TARGET_HEIGHT))
+                if 'rs_front_rgb' in desired_data:
+                    desired_data['rs_front_rgb'] = resize_rgb_frames(desired_data['rs_front_rgb'], (TARGET_WIDTH, TARGET_HEIGHT))
+                if 'rs_wrist_rgb' in desired_data:
+                    desired_data['rs_wrist_rgb'] = resize_rgb_frames(desired_data['rs_wrist_rgb'], (TARGET_WIDTH, TARGET_HEIGHT))
+                if 'zed_rgb' in desired_data:
+                    desired_data['zed_rgb'] = resize_rgb_frames(desired_data['zed_rgb'], (TARGET_WIDTH, TARGET_HEIGHT))
 
             # Create output episode group
             output_episode = output_root.create_group(episode_name)
-            output_episode.array("rs_side_rgb", rs_side_rgb, dtype=np.uint8, chunks=(1, *rs_side_rgb.shape[1:]))
-            output_episode.array("zed_rgb",     zed_rgb,     dtype=np.uint8, chunks=(1, *zed_rgb.shape[1:]))
-            output_episode.array("pose",   pose,   dtype=np.float32)
-            output_episode.array("action", action, dtype=np.float32)
+            for key, arr in desired_data.items():
+                dtype   = np.uint8 if arr.dtype == np.uint8 else arr.dtype
+                chunks  = (1, *arr.shape[1:]) if arr.ndim >= 3 else None
+                output_episode.array(key, arr, dtype=dtype, chunks=chunks)
             
             # Copy episode attributes
             if hasattr(input_episode, 'attrs'):
                 for attr_name, attr_value in input_episode.attrs.items():
                     output_episode.attrs[attr_name] = attr_value
             
-            output_episode.attrs["length"] = T
+            output_episode.attrs['length'] = T
             successful_episodes += 1
             CONSOLE.log(f"[green]✓ Completed {episode_name}")
             
@@ -377,14 +583,24 @@ def main() -> None:
         },
         "crop": {
             "rs_side": {
-                "enabled": ENABLE_CENTER_CROP_RS,
-                "size":   [RS_CROP_WIDTH, RS_CROP_HEIGHT],    # [W, H]
-                "offset": [RS_CROP_OFFSET_X, RS_CROP_OFFSET_Y],
+                "present": "rs_side_rgb" in desired_data_names,
+                "enabled": CROP_RS_FRONT,
+                "crop_range":   [RS_FRONT_W_RANGE, RS_FRONT_H_RANGE],    # [W, H]
+            },
+            "rs_front": {
+                "present": "rs_front_rgb" in desired_data_names,
+                "enabled": CROP_RS_FRONT,
+                "crop_range":   [RS_FRONT_W_RANGE, RS_FRONT_H_RANGE],
+            },
+            "rs_wrist": {
+                "present": "rs_wrist_rgb" in desired_data_names,
+                "enabled": CROP_RS_WRIST,
+                "crop_range":   [RS_WRIST_W_RANGE, RS_WRIST_H_RANGE],
             },
             "zed": {
-                "enabled": ENABLE_CENTER_CROP_ZED,
-                "size":   [ZED_CROP_WIDTH, ZED_CROP_HEIGHT],
-                "offset": [ZED_CROP_OFFSET_X, ZED_CROP_OFFSET_Y],
+                "present": "zed_rgb" in desired_data_names,
+                "enabled": CROP_ZED,
+                "crop_range":   [ZED_W_RANGE, ZED_H_RANGE],
             },
         },
         "color_jitter": {
@@ -405,12 +621,14 @@ def main() -> None:
 
     # Transformation log (unchanged)
     transformations = []
-    if ENABLE_CENTER_CROP_RS:
-        crop_type = "center" if RS_CROP_OFFSET_X is None and RS_CROP_OFFSET_Y is None else f"off-center ({RS_CROP_OFFSET_X}, {RS_CROP_OFFSET_Y})"
-        transformations.append(f"RS cropped ({crop_type}) to: {RS_CROP_HEIGHT}x{RS_CROP_WIDTH}")
-    if ENABLE_CENTER_CROP_ZED:
-        crop_type = "center" if ZED_CROP_OFFSET_X is None and ZED_CROP_OFFSET_Y is None else f"off-center ({ZED_CROP_OFFSET_X}, {ZED_CROP_OFFSET_Y})"
-        transformations.append(f"ZED cropped ({crop_type}) to: {ZED_CROP_HEIGHT}x{ZED_CROP_WIDTH}")
+    if CROP_RS_FRONT:
+        transformations.append(f"RS cropped ({RS_FRONT_W_RANGE}, {RS_FRONT_H_RANGE})")
+    if CROP_RS_SIDE:
+        transformations.append(f"RS side cropped ({RS_SIDE_W_RANGE}, {RS_SIDE_H_RANGE})")
+    if CROP_RS_WRIST:
+        transformations.append(f"RS wrist cropped ({RS_WRIST_W_RANGE}, {RS_WRIST_H_RANGE})")
+    if CROP_ZED:
+        transformations.append(f"ZED cropped ({ZED_W_RANGE}, {ZED_H_RANGE})")
     if ENABLE_COLOR_JITTER:
         transformations.append(f"Color jitter applied (brightness={COLOR_JITTER_BRIGHTNESS}, contrast={COLOR_JITTER_CONTRAST})")
     if ENABLE_RESIZE:
@@ -425,10 +643,22 @@ def main() -> None:
         sample_episode = output_root[episode_names[0]]
         CONSOLE.log(f"[cyan]Dataset info:")
         CONSOLE.log(f"[cyan]  - Episodes: {successful_episodes}")
-        CONSOLE.log(f"[cyan]  - RS RGB shape: {sample_episode['rs_side_rgb'].shape}")
-        CONSOLE.log(f"[cyan]  - ZED RGB shape: {sample_episode['zed_rgb'].shape}")
+        CONSOLE.log(f"[cyan]  - RS side RGB shape: {sample_episode['rs_side_rgb'].shape}") if "rs_side_rgb" in sample_episode else None
+        CONSOLE.log(f"[cyan]  - RS front RGB shape: {sample_episode['rs_front_rgb'].shape}") if "rs_front_rgb" in sample_episode else None
+        CONSOLE.log(f"[cyan]  - RS wrist RGB shape: {sample_episode['rs_wrist_rgb'].shape}") if "rs_wrist_rgb" in sample_episode else None
+        CONSOLE.log(f"[cyan]  - ZED RGB shape: {sample_episode['zed_rgb'].shape}") if "zed_rgb" in sample_episode else None
         CONSOLE.log(f"[cyan]  - Pose shape: {sample_episode['pose'].shape}")
         CONSOLE.log(f"[cyan]  - Action shape: {sample_episode['action'].shape}")
+
+    # Whether to create visualizations (set to False to skip)
+    VISUALIZE = True
+    
+    CONSOLE.log(f"[bold blue]Inspecting Zarr Dataset")
+    CONSOLE.log(f"Path: {OUTPUT_ZARR_DIR}")
+    CONSOLE.log(f"Episode: {0}")
+    CONSOLE.log(f"Visualize: {VISUALIZE}")
+    
+    inspect_zarr_dataset(OUTPUT_ZARR_DIR, 0, VISUALIZE)
 
 # ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":

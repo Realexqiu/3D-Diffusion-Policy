@@ -40,20 +40,24 @@ class XArmDataCollection(Node):
         self.pose_sub = Subscriber(self, PoseStamped, 'robot_position_action', qos_profile=sensor_qos)
         self.grip_sub = Subscriber(self, Float32, 'gripper_position', qos_profile=sensor_qos)
 
-        self.rs_rgb_sub = Subscriber(self, CompressedImage, '/rs_side/rs_side/color/image_raw/compressed', qos_profile=sensor_qos)
+        self.rs_side_rgb_sub = Subscriber(self, CompressedImage, '/rs_side/rs_side/color/image_raw/compressed', qos_profile=sensor_qos)
+        self.rs_front_rgb_sub = Subscriber(self, CompressedImage, '/rs_front/rs_front/color/image_raw/compressed', qos_profile=sensor_qos)
+        self.rs_wrist_rgb_sub = Subscriber(self, CompressedImage, '/rs_wrist/rs_wrist/color/image_raw/compressed', qos_profile=sensor_qos)
 
         self.zed_rgb_sub = Subscriber(self, CompressedImage, 'zed_image/rgb/compressed', qos_profile=sensor_qos)
         self.zed_depth_sub = Subscriber(self, CompressedImage, 'zed_image/depth/compressed', qos_profile=sensor_qos)
 
-        self.dt_left_sub = Subscriber(self, CompressedImage, 'RunCamera/image_raw_8/compressed',  qos_profile=sensor_qos)
-        self.dt_right_sub = Subscriber(self, CompressedImage, 'RunCamera/image_raw_10/compressed', qos_profile=sensor_qos)
+        self.dt_left_sub = Subscriber(self, CompressedImage, 'RunCamera/image_raw_20/compressed',  qos_profile=sensor_qos)
+        self.dt_right_sub = Subscriber(self, CompressedImage, 'RunCamera/image_raw_22/compressed', qos_profile=sensor_qos)
 
         # Synchronise everything
         self.sync = ApproximateTimeSynchronizer(
             [
                 self.pose_sub, 
                 self.grip_sub,
-                self.rs_rgb_sub,
+                self.rs_side_rgb_sub,
+                self.rs_front_rgb_sub,
+                self.rs_wrist_rgb_sub,
                 self.dt_left_sub, 
                 self.dt_right_sub,
                 self.zed_rgb_sub, 
@@ -72,7 +76,7 @@ class XArmDataCollection(Node):
         # ─── Buffers ────────────────────────────────────────────────────
         self.reset_buffers()
         self.is_collecting = False
-        self.demo_count = 11
+        self.demo_count = 22
 
     # ──────────────────────────────────────────────────────────────────────
     # Episode helpers
@@ -81,6 +85,8 @@ class XArmDataCollection(Node):
         self.pose_buf = []
         self.grip_buf = []
         self.rs_side_rgb_buf = []
+        self.rs_front_rgb_buf = []
+        self.rs_wrist_rgb_buf = []
         self.zed_rgb_buf = []
         self.zed_depth_buf = []
         self.dt_left_buf = []
@@ -111,6 +117,8 @@ class XArmDataCollection(Node):
                         pose_msg: PoseStamped, 
                         grip_msg: Float32,
                         rs_side_rgb_msg: CompressedImage, 
+                        rs_front_rgb_msg: CompressedImage, 
+                        rs_wrist_rgb_msg: CompressedImage, 
                         dt_left_msg: CompressedImage, 
                         dt_right_msg: CompressedImage,
                         zed_rgb_msg: CompressedImage, 
@@ -127,6 +135,8 @@ class XArmDataCollection(Node):
 
         # RealSense
         self.rs_side_rgb_buf.append(self.parse_color_image(rs_side_rgb_msg))
+        self.rs_front_rgb_buf.append(self.parse_color_image(rs_front_rgb_msg))
+        self.rs_wrist_rgb_buf.append(self.parse_color_image(rs_wrist_rgb_msg))
 
         # ZED
         self.zed_rgb_buf.append(self.parse_color_image(zed_rgb_msg))
@@ -164,6 +174,8 @@ class XArmDataCollection(Node):
         gripper = np.asarray(self.grip_buf, dtype=np.float32)
 
         rs_side_rgb = np.asarray(self.rs_side_rgb_buf) if self.rs_side_rgb_buf else None
+        rs_front_rgb = np.asarray(self.rs_front_rgb_buf) if self.rs_front_rgb_buf else None
+        rs_wrist_rgb = np.asarray(self.rs_wrist_rgb_buf) if self.rs_wrist_rgb_buf else None
         zed_rgb = np.asarray(self.zed_rgb_buf) if self.zed_rgb_buf else None
         zed_depth= np.asarray(self.zed_depth_buf) if self.zed_depth_buf else None
         dt_left = np.asarray(self.dt_left_buf) if self.dt_left_buf else None
@@ -179,6 +191,8 @@ class XArmDataCollection(Node):
             f.create_dataset('last_pose', data=last_pose)
 
             if rs_side_rgb is not None: f.create_dataset('rs_side_rgb', data=rs_side_rgb, compression='lzf')
+            if rs_front_rgb is not None: f.create_dataset('rs_front_rgb', data=rs_front_rgb, compression='lzf')
+            if rs_wrist_rgb is not None: f.create_dataset('rs_wrist_rgb', data=rs_wrist_rgb, compression='lzf')
             if zed_rgb is not None: f.create_dataset('zed_rgb', data=zed_rgb, compression='lzf')
             if zed_depth is not None:f.create_dataset('zed_depth',data=zed_depth,compression='lzf')
             if dt_left is not None: f.create_dataset('dt_left', data=dt_left, compression='lzf')

@@ -298,32 +298,22 @@ class InferenceUtils:
         zed_rgb_img = self._bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
         zed_rgb_img = zed_rgb_img[:, :, ::-1]
 
-        # #         # Center crop settings
-        # # ENABLE_CENTER_CROP_RS = False  # Set to False to disable center cropping
-        # # RS_CROP_WIDTH = 850      # Target width for center crop
-        # # RS_CROP_HEIGHT = 420     # Target height for center crop
-        # # ENABLE_CENTER_CROP_ZED = True
-        # ZED_CROP_WIDTH = 320
-        # ZED_CROP_HEIGHT = 360
-
-        # # # Off-center crop settings (set to None for center crop, or specify offset)
-        # # # Positive values move crop towards bottom-right, negative towards top-left
-        # # RS_CROP_OFFSET_X = None    # Horizontal offset from center (None for center crop)
-        # # RS_CROP_OFFSET_Y = None    # Vertical offset from center (None for center crop)
-        # ZED_CROP_OFFSET_X = -300   # For ZED camera
-        # ZED_CROP_OFFSET_Y = None   # For ZED camera
-        # ENABLE_CENTER_CROP_ZED = True
-
         #    # Apply cropping if enabled
         # if ENABLE_CENTER_CROP_ZED:
         #     zed_rgb_img = crop_frame(zed_rgb_img, (ZED_CROP_WIDTH, ZED_CROP_HEIGHT), 
         #                            offset_x=ZED_CROP_OFFSET_X, offset_y=ZED_CROP_OFFSET_Y)
 
-        if self.zed_meta['crop']['enabled']:
-            # import pdb; pdb.set_trace() # is this enabled?            
-            zed_rgb_img = self.crop_frame(zed_rgb_img, self.zed_meta['crop']['size'], self.zed_meta['crop']['offset'])
+        # if self.zed_meta['crop']['enabled']:
+        #     # import pdb; pdb.set_trace() # is this enabled?            
+        #     zed_rgb_img = self.crop_frame(zed_rgb_img, self.zed_meta['crop']['size'], self.zed_meta['crop']['offset'])
 
-    
+        zed_rgb_img = zed_rgb_img[220:340, 70:320, :]
+
+        # # path1 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/2d_dp_debug_baseline_alex/rs_side_rgb.jpg"
+        # path2 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/2d_dp_debug_baseline_alex/zed_rgb.jpg"
+
+        # # load the image from a file
+        # zed_rgb_img = cv2.imread(path2)
 
         zed_rgb_img = self.resize_for_policy(zed_rgb_img, 'zed_rgb')
 
@@ -336,8 +326,16 @@ class InferenceUtils:
         rs_img = self._bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
         rs_img = rs_img[:, :, ::-1]
 
-        if self.rs_side_meta['crop']['enabled']:
-            rs_img = self.crop_frame(rs_img, self.rs_side_meta['crop']['size'], self.rs_side_meta['crop']['offset'])
+        # if self.rs_side_meta['crop']['enabled']:
+        #     rs_img = self.crop_frame(rs_img, self.rs_side_meta['crop']['size'], self.rs_side_meta['crop']['offset'])
+
+        rs_img = rs_img[160:320, :640, :]
+
+        # path1 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/2d_dp_debug_baseline_alex/rs_side_rgb.jpg"
+        # # path2 = "/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/2d_dp_debug_baseline_alex/zed_rgb.jpg"
+
+        # rs_img= cv2.imread(path1)
+        # # zed_img_single = cv2.imread(path2)
 
         rs_img = self.resize_for_policy(rs_img, 'rs_side_rgb')
 

@@ -15,7 +15,6 @@ class ZedImagePublisher(Node):
         sensor_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST)
 
         # Create publishers for RGB, depth, and compressed RGB images
-        self.rgb_publisher = self.create_publisher(Image, 'zed_image/rgb', sensor_qos)
         self.compressed_rgb_publisher = self.create_publisher(CompressedImage, 'zed_image/rgb/compressed', sensor_qos)
         self.compressed_depth_publisher = self.create_publisher(CompressedImage, 'zed_image/depth/compressed', sensor_qos)
 

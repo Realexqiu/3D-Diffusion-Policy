@@ -41,17 +41,7 @@ export HYDRA_FULL_ERROR=1
 export CUDA_VISIBLE_DEVICES="${GPU}"
 
 # ─── Launch training ───────────────────────────────────────────────────────────
-accelerate launch --num_processes 1 train_2d.py \
-  --config-name "${ALG}.yaml" \
-  task="${TASK}" \
-  hydra.run.dir="${RUN_DIR}" \
-  training.debug="${DEBUG}" \
-  training.seed="${SEED}" \
-  training.device="cuda:${GPU}" \
-  exp_name="${EXP}" \
-  logging.mode="${WANDB_MODE}"
-
-# python train_2d.py \
+# accelerate launch --num_processes 1 train_2d.py \
 #   --config-name "${ALG}.yaml" \
 #   task="${TASK}" \
 #   hydra.run.dir="${RUN_DIR}" \
@@ -61,6 +51,13 @@ accelerate launch --num_processes 1 train_2d.py \
 #   exp_name="${EXP}" \
 #   logging.mode="${WANDB_MODE}"
 
+python train_2d.py \
+  --config-name "${ALG}.yaml" \
+  task="${TASK}" \
+  hydra.run.dir="${RUN_DIR}" \
+  training.debug="${DEBUG}" \
+  training.seed="${SEED}" \
+  training.device="cuda:${GPU}" \
+  exp_name="${EXP}" \
+  logging.mode="${WANDB_MODE}"
 
-# (optionally add) \
-#  checkpoint.save_ckpt="${SAVE_CKPT}"

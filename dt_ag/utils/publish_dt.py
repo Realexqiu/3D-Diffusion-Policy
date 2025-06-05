@@ -4,9 +4,9 @@ Dual-DenseTact publisher + amplified frame-to-frame difference stream
 """
 
 import os, subprocess, cv2, numpy as np, rclpy
-from rclpy.node         import Node
-from sensor_msgs.msg    import Image, CompressedImage
-from cv_bridge          import CvBridge
+from rclpy.node import Node
+from sensor_msgs.msg import CompressedImage
+from cv_bridge import CvBridge
 
 
 class DualCameraPublisher(Node):
@@ -18,18 +18,22 @@ class DualCameraPublisher(Node):
         self.diff_gain = 8.0
 
         # camera IDs ---------------------------------------------------
-        self.left_id  = 8
-        self.right_id = 10
+        # self.left_id = 8
+        # self.right_id = 10
+
+        # Cam ids when 3 realsense cameras and zed are connected (dt's are plugged in last, left (tape) first then right)
+        self.left_id = 20  
+        self.right_id = 22  
 
         # manual cam settings
-        self._wb_temp   = 6500
-        self._exposure  = 50
+        self._wb_temp = 6500
+        self._exposure = 50
 
         # publishers ---------------------------------------------------
         self._init_publishers()
 
         # OpenCV capture ----------------------------------------------
-        self.left_cap  = cv2.VideoCapture(self.left_id)
+        self.left_cap = cv2.VideoCapture(self.left_id)
         self.right_cap = cv2.VideoCapture(self.right_id)
         for cap in (self.left_cap, self.right_cap):
             cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
@@ -41,12 +45,10 @@ class DualCameraPublisher(Node):
             self.get_logger().error(f"Unable to open camera {self.right_id}")
 
         # helpers ------------------------------------------------------
-        self.bridge        = CvBridge()
+        self.bridge = CvBridge()
         self.encode_params = [cv2.IMWRITE_JPEG_QUALITY, 80]    # jpeg Q-80
-        self.prev_left     = None
-        self.prev_right    = None
-        self.count         = 0
-        self._settings_ok  = False
+        self.count = 0
+        self._settings_ok = False
 
         self.timer = self.create_timer(1/15.0, self.timer_cb)  # 15 Hz
 
@@ -60,19 +62,8 @@ class DualCameraPublisher(Node):
 
     # ─── publisher initialisation ───────────────────────────────────
     def _init_publishers(self):
-        self.left_raw_pub   = self.create_publisher(Image,
-                               f'RunCamera/image_raw_{self.left_id}', 20)
-        self.left_comp_pub  = self.create_publisher(CompressedImage,
-                               f'RunCamera/image_raw_{self.left_id}/compressed', 20)
-        self.left_diff_pub  = self.create_publisher(Image,
-                               f'RunCamera/image_diff_{self.left_id}', 20)
-
-        self.right_raw_pub  = self.create_publisher(Image,
-                               f'RunCamera/image_raw_{self.right_id}', 20)
-        self.right_comp_pub = self.create_publisher(CompressedImage,
-                               f'RunCamera/image_raw_{self.right_id}/compressed', 20)
-        self.right_diff_pub = self.create_publisher(Image,
-                               f'RunCamera/image_diff_{self.right_id}', 20)
+        self.left_comp_pub = self.create_publisher(CompressedImage, f'RunCamera/image_raw_{self.left_id}/compressed', 20)
+        self.right_comp_pub = self.create_publisher(CompressedImage, f'RunCamera/image_raw_{self.right_id}/compressed', 20)
 
     # ─── camera control helpers (unchanged) ─────────────────────────
     @staticmethod
@@ -111,43 +102,6 @@ class DualCameraPublisher(Node):
                 ])
         self._settings_ok = True
 
-    # ─── publishing helpers ─────────────────────────────────────────
-    def _publish_both(self, frame, raw_pub, comp_pub, cam_id):
-        frame = cv2.resize(frame, (320, 180))
-
-        # raw
-        raw_msg                 = self.bridge.cv2_to_imgmsg(frame, 'bgr8')
-        raw_msg.header.stamp    = self.get_clock().now().to_msg()
-        raw_msg.header.frame_id = f'camera_{cam_id}_frame'
-        raw_pub.publish(raw_msg)
-
-        # jpeg
-        ok, buf = cv2.imencode('.jpg', frame, self.encode_params)
-        if ok:
-            comp_msg              = CompressedImage()
-            comp_msg.header       = raw_msg.header
-            comp_msg.format       = 'jpeg'
-            comp_msg.data         = buf.tobytes()
-            comp_pub.publish(comp_msg)
-        else:
-            self.get_logger().warning(f"Camera {cam_id}: JPEG encode failed")
-
-        return frame
-
-    def _publish_diff(self, prev_frame, cur_frame, diff_pub, cam_id):
-        if prev_frame is None:
-            diff = np.zeros((180, 320), np.uint8)
-        else:
-            g_prev = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-            g_cur  = cv2.cvtColor(cur_frame,  cv2.COLOR_BGR2GRAY)
-            diff   = cv2.absdiff(g_prev, g_cur)
-            diff   = np.clip(diff.astype(np.float32) * self.diff_gain, 0, 255).astype(np.uint8)
-
-        diff_msg                 = self.bridge.cv2_to_imgmsg(diff, 'mono8')
-        diff_msg.header.stamp    = self.get_clock().now().to_msg()
-        diff_msg.header.frame_id = f'diff_{cam_id}'
-        diff_pub.publish(diff_msg)
-
     # ─── main timer ─────────────────────────────────────────────────
     def timer_cb(self):
         self.count += 1
@@ -157,22 +111,34 @@ class DualCameraPublisher(Node):
         # left
         ok_l, frm_l = self.left_cap.read()
         if ok_l:
-            frm_l_rs = self._publish_both(frm_l, self.left_raw_pub,
-                                          self.left_comp_pub, self.left_id)
-            self._publish_diff(self.prev_left, frm_l_rs,
-                               self.left_diff_pub, self.left_id)
-            self.prev_left = frm_l_rs
+            frame_resized = cv2.resize(frm_l, (320, 180))
+            ok, buf = cv2.imencode('.jpg', frame_resized, self.encode_params)
+            if ok:
+                comp_msg = CompressedImage()
+                comp_msg.header.stamp = self.get_clock().now().to_msg()
+                comp_msg.header.frame_id = f'camera_{self.left_id}_frame'
+                comp_msg.format = 'jpeg'
+                comp_msg.data = buf.tobytes()
+                self.left_comp_pub.publish(comp_msg)
+            else:
+                self.get_logger().warning(f"Camera {self.left_id}: JPEG encode failed")
         else:
             self.get_logger().warning(f"Camera {self.left_id}: grab failed")
 
         # right
         ok_r, frm_r = self.right_cap.read()
         if ok_r:
-            frm_r_rs = self._publish_both(frm_r, self.right_raw_pub,
-                                          self.right_comp_pub, self.right_id)
-            self._publish_diff(self.prev_right, frm_r_rs,
-                               self.right_diff_pub, self.right_id)
-            self.prev_right = frm_r_rs
+            frame_resized = cv2.resize(frm_r, (320, 180))
+            ok, buf = cv2.imencode('.jpg', frame_resized, self.encode_params)
+            if ok:
+                comp_msg = CompressedImage()
+                comp_msg.header.stamp = self.get_clock().now().to_msg()
+                comp_msg.header.frame_id = f'camera_{self.right_id}_frame'
+                comp_msg.format = 'jpeg'
+                comp_msg.data = buf.tobytes()
+                self.right_comp_pub.publish(comp_msg)
+            else:
+                self.get_logger().warning(f"Camera {self.right_id}: JPEG encode failed")
         else:
             self.get_logger().warning(f"Camera {self.right_id}: grab failed")
 

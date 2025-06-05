@@ -5,7 +5,7 @@ import sys, pathlib, os
 # go up two levels to ~/Documents/3D-Diffusion-Policy, then into the '3D-Diffusion-Policy' subfolder
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
-DEBUG_DIR = SCRIPT_DIR / "2d_dp_debug"
+DEBUG_DIR = SCRIPT_DIR / "2d_dp_debug_baseline_alex"
 LOCAL_ROOT = pathlib.Path(__file__).resolve().parents[2] / "3D-Diffusion-Policy"
 assert LOCAL_ROOT.is_dir(), f"Can't find code at {LOCAL_ROOT}"
 sys.path.insert(0, str(LOCAL_ROOT))
@@ -66,121 +66,6 @@ class PolicyNode3D(InferenceUtils, Node):
 # # ----------------------------------------------------------------------
 # # Inference loop
 # # ----------------------------------------------------------------------
-# def inference_loop(model_path, shared_obs, action_queue, action_horizon = 4, device = "cuda", start_time = 0, first_loop = True):
-
-#     # Wait for 3 seconds to allow the robot to move to the starting position
-#     if first_loop:
-#         time.sleep(3.0)
-
-#     model = load_policy(model_path)
-#     print("Inference process started.")
-
-#     # ─── Wait until first observation ───────────────────────────────
-#     while shared_obs.get("obs") is None:
-#         time.sleep(0.05)
-
-#     # Initialize previous timestamps based on available data
-#     prev_timestamps = {}
-#     obs_now = shared_obs["obs"]
-    
-#     if "pose_timestamps" in obs_now:
-#         prev_timestamps["pose"] = obs_now["pose_timestamps"][-1]
-#     if "zed_rgb_timestamps" in obs_now:
-#         prev_timestamps["zed"] = obs_now["zed_rgb_timestamps"][-1]
-#     if "rs_rgb_timestamps" in obs_now:
-#         prev_timestamps["rs"] = obs_now["rs_rgb_timestamps"][-1]
-
-#     while True:
-#         loop_start_time = time.time()
-        
-#         # If user paused with the keyboard, spin-wait cheaply
-#         if shared_obs.get("paused", False):
-#             time.sleep(0.05)
-#             continue
-
-#         wait_start_time = time.time()
-#         while True:
-#             obs_now = shared_obs["obs"]
-
-#             # Check if we have new data for all available sensors
-#             all_new = True
-            
-#             if "pose_timestamps" in obs_now:
-#                 pose_new = np.min(obs_now["pose_timestamps"]) > prev_timestamps.get("pose", -1)
-#                 all_new = all_new and pose_new
-#             if "zed_rgb_timestamps" in obs_now:
-#                 zed_new = np.min(obs_now["zed_rgb_timestamps"]) > prev_timestamps.get("zed", -1)
-#                 all_new = all_new and zed_new
-#             if "rs_rgb_timestamps" in obs_now:
-#                 rs_new = np.min(obs_now["rs_rgb_timestamps"]) > prev_timestamps.get("rs", -1)
-#                 all_new = all_new and rs_new
-
-#             # if all_new and shared_obs['exec_done']:
-#             #     break
-
-#             if all_new:
-#                 break
-#             time.sleep(0.001)
-        
-#         wait_time = time.time() - wait_start_time
-
-#         # Save newest observation timestamps
-#         prep_start_time = time.time()
-#         if "pose_timestamps" in obs_now:
-#             prev_timestamps["pose"] = obs_now["pose_timestamps"][-1]
-#         if "zed_rgb_timestamps" in obs_now:
-#             prev_timestamps["zed"] = obs_now["zed_rgb_timestamps"][-1]
-#         if "rs_rgb_timestamps" in obs_now:
-#             prev_timestamps["rs"] = obs_now["rs_rgb_timestamps"][-1]
-
-#         # Grab new observations
-#         obs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in obs_now.items()} 
-
-#         # Extract policy observations - only include keys that the model expects
-#         model_obs = {}
-#         for k in ["pose", "zed_rgb", "rs_side_rgb", "rs_wrist_rgb"]:
-#             if k in obs:
-#                 model_obs[k] = obs[k]
-        
-#         prep_time = time.time() - prep_start_time
-
-#         # Save the most recent observation for debugging
-#         save_data(model_obs, debug_dir=DEBUG_DIR)
-
-#         # Predict an action-horizon batch
-#         inference_start_time = time.time()
-#         with torch.no_grad():
-#             actions = model.predict_action(model_obs)["action"][0].detach().cpu().numpy()
-#         inference_time = time.time() - inference_start_time
-
-#         # q_actions = actions[:action_horizon]          # shape (action_horizon, 10)
-#         print(f"Actions size: {actions.shape}")
-#         q_actions = [actions[2]]
-
-#         # Print observation
-#         log_policy(obs, q_actions, start_time)
-
-#         # Fill the queue
-#         queue_start_time = time.time()
-#         for act in q_actions:
-#             action_queue.put((act, time.monotonic() - start_time))
-#         queue_time = time.time() - queue_start_time
-
-#         time.sleep(.05)
-#         total_loop_time = time.time() - loop_start_time
-#         print(f"\n{'='*60}")
-#         print(f"INFERENCE LOOP TIMING (iteration at {time.monotonic() - start_time:.3f}s)")
-#         print(f"{'='*60}")
-#         print(f"Wait for new data:     {wait_time*1000:.2f} ms")
-#         print(f"Data preparation:      {prep_time*1000:.2f} ms") 
-#         print(f"Model inference:       {inference_time*1000:.2f} ms")
-#         print(f"Queue actions:         {queue_time*1000:.2f} ms")
-#         print(f"TOTAL LOOP TIME:       {total_loop_time*1000:.2f} ms")
-#         print(f"{'='*60}\n")
-#         # log_inference_timing(start_time, wait_time, prep_time, inference_time, queue_time, total_loop_time)
-
-#         # Sleep to allow for execution latency
-#         time.sleep(.5)
 
 def inference_loop(model_path, shared_obs, action_queue, action_horizon = 4, device = "cuda", start_time = 0):
 
@@ -270,7 +155,7 @@ def inference_loop(model_path, shared_obs, action_queue, action_horizon = 4, dev
         # q_actions = actions[:action_horizon]          # shape (action_horizon, 10)
         # print actions size
         print(f"Actions size: {actions.shape}")
-        q_actions = [actions[0]]
+        q_actions = [actions[1]]
 
         # Print observation
         log_policy(obs, q_actions, start_time)
@@ -351,7 +236,7 @@ def main(args=None):
     start_time = time.monotonic()
 
     # Model path
-    model_path = '/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/models/epoch=1300-train_loss=0.00650.ckpt'
+    model_path = '/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/models/one_demo_1700.ckpt'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     inference_action_horizon = 2

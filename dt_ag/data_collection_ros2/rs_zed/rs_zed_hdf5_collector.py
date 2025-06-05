@@ -27,9 +27,10 @@ class XArmDataCollection(Node):
         # Subscribers for robot and cameras
         self.pose_sub = Subscriber(self, PoseStamped, 'robot_position_action', qos_profile=sensor_qos)
         self.gripper_sub = Subscriber(self, Float32, 'gripper_position', qos_profile=sensor_qos)
-        self.rs_side_color_sub = Subscriber(self, CompressedImage, '/rs_side/rs_side/color/image_raw/compressed', qos_profile=sensor_qos)
-        # self.rs_wrist_color_sub = Subscriber(self, CompressedImage, '/rs_wrist/rs_wrist/color/image_raw/compressed', qos_profile=sensor_qos)
-        self.zed_color_sub = Subscriber(self, CompressedImage, 'zed_image/rgb/compressed', qos_profile=sensor_qos)
+        self.rs_side_rgb_sub = Subscriber(self, CompressedImage, '/rs_side/rs_side/color/image_raw/compressed', qos_profile=sensor_qos)
+        self.rs_wrist_rgb_sub = Subscriber(self, CompressedImage, '/rs_wrist/rs_wrist/color/image_raw/compressed', qos_profile=sensor_qos)
+        self.rs_front_rgb_sub = Subscriber(self, CompressedImage, '/rs_front/rs_front/color/image_raw/compressed', qos_profile=sensor_qos)
+        self.zed_rgb_sub = Subscriber(self, CompressedImage, 'zed_image/rgb/compressed', qos_profile=sensor_qos)
         self.zed_depth_sub = Subscriber(self, CompressedImage, 'zed_image/depth/compressed', qos_profile=sensor_qos)
 
         # ApproximateTimeSynchronizer
@@ -37,9 +38,10 @@ class XArmDataCollection(Node):
             [
                 self.pose_sub,
                 self.gripper_sub,
-                self.rs_side_color_sub,
-                # self.rs_wrist_color_sub,
-                self.zed_color_sub,
+                self.rs_side_rgb_sub,
+                self.rs_front_rgb_sub,
+                self.rs_wrist_rgb_sub,
+                self.zed_rgb_sub,
                 self.zed_depth_sub
             ],
             queue_size=100,
@@ -54,13 +56,14 @@ class XArmDataCollection(Node):
 
         # State
         self.is_collecting = False
-        self.demo_count = 51
+        self.demo_count = 0
 
         self.pose_data = []
         self.gripper_data = []
-        self.rs_side_color_frames = []
-        # self.rs_wrist_color_frames = []
-        self.zed_color_frames = []
+        self.rs_side_rgb_frames = []
+        self.rs_wrist_rgb_frames = []
+        self.rs_front_rgb_frames = []
+        self.zed_rgb_frames = []
         self.zed_depth_frames = []
 
         self._bridge = CvBridge()
@@ -73,9 +76,10 @@ class XArmDataCollection(Node):
             # Clear buffers
             self.pose_data.clear()
             self.gripper_data.clear()
-            self.rs_side_color_frames.clear()
-            # self.rs_wrist_color_frames.clear()
-            self.zed_color_frames.clear()
+            self.rs_side_rgb_frames.clear()
+            self.rs_front_rgb_frames.clear()
+            self.rs_wrist_rgb_frames.clear()
+            self.zed_rgb_frames.clear()
             self.zed_depth_frames.clear()
 
             self.episode_start_time = self.get_clock().now()
@@ -102,9 +106,10 @@ class XArmDataCollection(Node):
     def synced_callback(self, 
                         pose_msg: PoseStamped, 
                         grip_msg: Float32, 
-                        rs_side_color_msg: CompressedImage, 
-                        # rs_wrist_color_msg: CompressedImage, 
-                        zed_color_msg: CompressedImage, 
+                        rs_side_rgb_msg: CompressedImage, 
+                        rs_front_rgb_msg: CompressedImage, 
+                        rs_wrist_rgb_msg: CompressedImage, 
+                        zed_rgb_msg: CompressedImage, 
                         zed_depth_msg: CompressedImage
                         ):  
         
@@ -118,15 +123,18 @@ class XArmDataCollection(Node):
         self.gripper_data.append(grip_msg.data)
 
         # RealSense color
-        rs_side_color_np_rgb = self.parse_color_image(rs_side_color_msg)
-        self.rs_side_color_frames.append(rs_side_color_np_rgb)
+        rs_side_rgb_np = self.parse_color_image(rs_side_rgb_msg)
+        self.rs_side_rgb_frames.append(rs_side_rgb_np)
 
-        # rs_wrist_color_np_rgb = self.parse_color_image(rs_wrist_color_msg)
-        # self.rs_wrist_color_frames.append(rs_wrist_color_np_rgb)
+        rs_front_rgb_np = self.parse_color_image(rs_front_rgb_msg)
+        self.rs_front_rgb_frames.append(rs_front_rgb_np)
+
+        rs_wrist_rgb_np = self.parse_color_image(rs_wrist_rgb_msg)
+        self.rs_wrist_rgb_frames.append(rs_wrist_rgb_np)
 
         # ZED color
-        zed_np_rgb = self.parse_color_image(zed_color_msg)
-        self.zed_color_frames.append(zed_np_rgb)
+        zed_rgb_np = self.parse_color_image(zed_rgb_msg)
+        self.zed_rgb_frames.append(zed_rgb_np)
 
         # ZED depth
         zed_depth_np = self.parse_depth_image(zed_depth_msg)
@@ -142,9 +150,10 @@ class XArmDataCollection(Node):
         last_pose_array = np.roll(pose_array, shift=-1, axis=0)
         last_pose_array[0] = pose_array[0]
 
-        rs_side_color_stack = np.stack(self.rs_side_color_frames,  axis=0) if self.rs_side_color_frames else []
-        # rs_wrist_color_stack = np.stack(self.rs_wrist_color_frames,  axis=0) if self.rs_wrist_color_frames else []
-        zed_color_stack = np.stack(self.zed_color_frames, axis=0) if self.zed_color_frames else []
+        rs_side_color_stack = np.stack(self.rs_side_rgb_frames,  axis=0) if self.rs_side_rgb_frames else []
+        rs_front_color_stack = np.stack(self.rs_front_rgb_frames,  axis=0) if self.rs_front_rgb_frames else []
+        rs_wrist_color_stack = np.stack(self.rs_wrist_rgb_frames,  axis=0) if self.rs_wrist_rgb_frames else []
+        zed_color_stack = np.stack(self.zed_rgb_frames, axis=0) if self.zed_rgb_frames else []
         zed_depth_stack = np.stack(self.zed_depth_frames, axis=0) if self.zed_depth_frames else []
 
         save_dir = os.path.join(os.getcwd(), "demo_data")
@@ -155,7 +164,8 @@ class XArmDataCollection(Node):
             f.create_dataset("gripper", data=grip_array)
             f.create_dataset("last_pose", data=last_pose_array)
             if len(rs_side_color_stack): f.create_dataset("rs_side_rgb", data=rs_side_color_stack, compression="lzf")
-            # if len(rs_wrist_color_stack): f.create_dataset("rs_wrist_rgb", data=rs_wrist_color_stack, compression="lzf")
+            if len(rs_front_color_stack): f.create_dataset("rs_front_rgb", data=rs_front_color_stack, compression="lzf")
+            if len(rs_wrist_color_stack): f.create_dataset("rs_wrist_rgb", data=rs_wrist_color_stack, compression="lzf")
             if len(zed_color_stack): f.create_dataset("zed_rgb", data=zed_color_stack, compression="lzf")
             if len(zed_depth_stack): f.create_dataset("zed_depth", data=zed_depth_stack, compression="lzf")
 

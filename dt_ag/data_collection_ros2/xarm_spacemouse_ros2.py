@@ -33,7 +33,7 @@ class Spacemouse2Xarm(Node):
         self.arm.set_state(0)
 
         # --- SpaceMouse device ---
-        self.device = SpaceMouse(pos_sensitivity=1.3, rot_sensitivity=1.3)
+        self.device = SpaceMouse(pos_sensitivity=1.2, rot_sensitivity=1.2)
         self.device.start_control()
 
         # Track previous button states for edge detection

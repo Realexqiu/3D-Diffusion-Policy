@@ -25,6 +25,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import CompressedImage
 import message_filters
 from rclpy.executors import MultiThreadedExecutor
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+DEBUG_DIR = SCRIPT_DIR / "2d_dp_debug_densetact_beast"
 gendp_path = '/home/alex/Documents/DT-Diffusion-Policy/gendp/gendp'
 
 if gendp_path not in sys.path:
@@ -45,14 +47,14 @@ class PolicyNode3D(Node):
         self.obs_keys = list(shape_meta['obs'].keys())
         self.has_zed_rgb = 'zed_rgb' in self.obs_keys
         self.has_zed_depth = 'zed_depth_images' in self.obs_keys
-        self.has_rs_rgb = 'rs_side_rgb' in self.obs_keys
+        self.has_rs_side_rgb = 'rs_side_rgb' in self.obs_keys
         self.has_dt_left = 'dt_left' in self.obs_keys
         self.has_dt_right = 'dt_right' in self.obs_keys
         
         self.get_logger().info(f"Policy observation keys: {self.obs_keys}")
         self.get_logger().info(f"Using ZED RGB camera: {self.has_zed_rgb}")
         self.get_logger().info(f"Using ZED Depth camera: {self.has_zed_depth}")
-        self.get_logger().info(f"Using RealSense RGB camera: {self.has_rs_rgb}")
+        self.get_logger().info(f"Using RealSense RGB camera: {self.has_rs_side_rgb}")
         self.get_logger().info(f"Using DT Left camera: {self.has_dt_left}")
         self.get_logger().info(f"Using DT Right camera: {self.has_dt_right}")
 
@@ -71,21 +73,20 @@ class PolicyNode3D(Node):
             subscribers.append(self.zed_rgb_compressed_sub)
 
         if self.has_zed_depth:
-            self.zed_depth_sub = message_filters.Subscriber(self, Image, '/zed_image/depth', qos_profile=sensor_qos)
-            subscribers.append(self.zed_depth_sub)
+            self.zed_depth_compressed_sub = message_filters.Subscriber(self, CompressedImage, '/zed_image/depth/compressed', qos_profile=sensor_qos)
+            subscribers.append(self.zed_depth_compressed_sub)
             
-        if self.has_rs_rgb:
-            # self.rs_color_sub = message_filters.Subscriber(self, Image, '/camera/realsense_camera/color/image_raw', qos_profile=sensor_qos)
+        if self.has_rs_side_rgb:
             self.rs_color_compressed_sub = message_filters.Subscriber(self, CompressedImage, '/rs_side/rs_side/color/image_raw/compressed', qos_profile=sensor_qos)
             subscribers.append(self.rs_color_compressed_sub)
 
         if self.has_dt_left:
-            self.dt_left_sub = message_filters.Subscriber(self, CompressedImage, '/RunCamera/image_raw_8/compressed', qos_profile=sensor_qos)
-            subscribers.append(self.dt_left_sub)
+            self.dt_left_compressed_sub = message_filters.Subscriber(self, CompressedImage, '/RunCamera/image_raw_8/compressed', qos_profile=sensor_qos)
+            subscribers.append(self.dt_left_compressed_sub)
 
         if self.has_dt_right:
-            self.dt_right_sub = message_filters.Subscriber(self, CompressedImage, '/RunCamera/image_raw_10/compressed', qos_profile=sensor_qos)
-            subscribers.append(self.dt_right_sub)
+            self.dt_right_compressed_sub = message_filters.Subscriber(self, CompressedImage, '/RunCamera/image_raw_10/compressed', qos_profile=sensor_qos)
+            subscribers.append(self.dt_right_compressed_sub)
 
         # Create synchronizer with only the required subscribers
         self.sync = message_filters.ApproximateTimeSynchronizer(
@@ -110,7 +111,6 @@ class PolicyNode3D(Node):
         # Shared data and action queue
         self.shared_obs = shared_obs
         self.action_queue = action_queue
-        self.dt = 0.1  
         
         # Timers
         self.create_timer(1/30.0, self.timer_callback)
@@ -125,8 +125,12 @@ class PolicyNode3D(Node):
             self.zed_rgb_buffer = []
         if self.has_zed_depth:
             self.zed_depth_buffer = []
-        if self.has_rs_rgb:
+        if self.has_rs_side_rgb:
             self.rs_color_buffer = []
+        if self.has_dt_left:
+            self.dt_left_buffer = []
+        if self.has_dt_right:
+            self.dt_right_buffer = []
 
         # Rotation transformer
         self.tf = RotationTransformer('rotation_6d', 'quaternion')
@@ -136,9 +140,10 @@ class PolicyNode3D(Node):
         self.paused = False
         self.even = True
         self.pending_actions = []
-        self.center_crop = False
-        self.RS_CROP_SIZE = (850, 420) # Width, Height
-        self.ZED_CROP_SIZE = (1400, 1200) # Width, Height
+        self.zed_crop = True
+        self.rs_side_crop = False
+        self.dt_left_crop = True
+        self.dt_right_crop = True
 
         # Jiggle gripper to activate it
         msg = Float32()
@@ -202,7 +207,7 @@ class PolicyNode3D(Node):
         buffer_lengths = [len(self.pose_buffer)]
         if self.has_zed_rgb:
             buffer_lengths.append(len(self.zed_rgb_buffer))
-        if self.has_rs_rgb:
+        if self.has_rs_side_rgb:
             buffer_lengths.append(len(self.rs_color_buffer))
             
         min_len = min(buffer_lengths)
@@ -231,13 +236,29 @@ class PolicyNode3D(Node):
             obs_dict['zed_rgb_timestamps'] = zed_rgb_tstamps
 
         # Add RealSense data if available
-        if self.has_rs_rgb:
+        if self.has_rs_side_rgb:
             rs_slice = self.rs_color_buffer[-self.observation_horizon:] 
             rs_np = np.stack([r[0] for r in rs_slice])             # (T, 3, H, W)
             rs_rgb_tstamps = np.array([r[1] for r in rs_slice])             # (T,)
             rs_rgb_tensor = torch.from_numpy(rs_np).unsqueeze(0)           # (1, T, 3, H, W)
             obs_dict['rs_side_rgb'] = rs_rgb_tensor
             obs_dict['rs_rgb_timestamps'] = rs_rgb_tstamps
+
+        if self.has_dt_left:
+            dt_left_slice = self.dt_left_buffer[-self.observation_horizon:]
+            dt_left_np = np.stack([r[0] for r in dt_left_slice])
+            dt_left_tstamps = np.array([r[1] for r in dt_left_slice])
+            dt_left_tensor = torch.from_numpy(dt_left_np).unsqueeze(0)
+            obs_dict['dt_left'] = dt_left_tensor
+            obs_dict['dt_left_timestamps'] = dt_left_tstamps
+
+        if self.has_dt_right:
+            dt_right_slice = self.dt_right_buffer[-self.observation_horizon:]
+            dt_right_np = np.stack([r[0] for r in dt_right_slice])
+            dt_right_tstamps = np.array([r[1] for r in dt_right_slice])
+            dt_right_tensor = torch.from_numpy(dt_right_np).unsqueeze(0)
+            obs_dict['dt_right'] = dt_right_tensor
+            obs_dict['dt_right_timestamps'] = dt_right_tstamps
 
         # Push to shared memory (IPC)
         self.shared_obs['obs'] = obs_dict
@@ -285,9 +306,7 @@ class PolicyNode3D(Node):
 
     def synced_obs_callback(self, *args):
         """Process synchronized observations and generate point cloud"""
-        
-        # self.get_logger().info("Synced obs callback")
-        
+                
         # Parse arguments based on what's available
         arg_idx = 0
         pose_msg = args[arg_idx]
@@ -298,16 +317,26 @@ class PolicyNode3D(Node):
         
         zed_rgb_msg = None
         zed_depth_msg = None
-        rs_msg = None
+        rs_side_msg = None
+        dt_left_msg = None
+        dt_right_msg = None
         
         if self.has_zed_rgb:
             zed_rgb_msg = args[arg_idx]
             arg_idx += 1
             
-        if self.has_rs_rgb:
-            rs_msg = args[arg_idx]
+        if self.has_rs_side_rgb:
+            rs_side_msg = args[arg_idx]
             arg_idx += 1
 
+        if self.has_dt_left:
+            dt_left_msg = args[arg_idx]
+            arg_idx += 1
+
+        if self.has_dt_right:
+            dt_right_msg = args[arg_idx]
+            arg_idx += 1
+            
         # Update gripper state
         self.gripper_state = gripper_msg.data
         
@@ -316,15 +345,19 @@ class PolicyNode3D(Node):
 
         # Process camera messages based on availability
         if self.has_zed_rgb and zed_rgb_msg is not None:
-            # self.zed_rgb_callback(zed_rgb_msg)
             self.zed_rgb_compressed_callback(zed_rgb_msg)
 
         if self.has_zed_depth and zed_depth_msg is not None:
-            self.zed_depth_callback(zed_depth_msg)
+            self.zed_depth_compressed_callback(zed_depth_msg)
 
-        if self.has_rs_rgb and rs_msg is not None:
-            # self.rs_rgb_callback(rs_msg)
-            self.rs_rgb_compressed_callback(rs_msg)
+        if self.has_rs_side_rgb and rs_side_msg is not None:
+            self.rs_rgb_compressed_callback(rs_side_msg)
+
+        if self.has_dt_left and dt_left_msg is not None:
+            self.dt_left_compressed_callback(dt_left_msg)
+
+        if self.has_dt_right and dt_right_msg is not None:
+            self.dt_right_compressed_callback(dt_right_msg)
 
         self.update_observation()
 
@@ -345,39 +378,17 @@ class PolicyNode3D(Node):
         if len(self.pose_buffer) > self.observation_horizon:
             self.pose_buffer.pop(0)
 
-    def zed_rgb_callback(self, msg):
-        """Process zed rgb message"""
-        zed_rgb_img = self._bridge.imgmsg_to_cv2(msg)
-        # # Convert RGB back to BGR for OpenCV
-        zed_rgb_img = cv2.cvtColor(zed_rgb_img, cv2.COLOR_RGB2BGR)
-
-        if self.center_crop:
-            zed_rgb_img = self.center_crop_rgb_frames(zed_rgb_img, self.ZED_CROP_SIZE)
-        zed_rgb_img = self.resize_for_policy(zed_rgb_img, 'zed_rgb')
-
-        self.zed_rgb_buffer.append((zed_rgb_img, time.monotonic() - self.start_time))
-        if len(self.zed_rgb_buffer) > self.observation_horizon:
-            self.zed_rgb_buffer.pop(0)
-
     def zed_rgb_compressed_callback(self, msg):
         """Process zed compressed rgb message"""
         zed_rgb_img = self._bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
         # Image is already in BGR format from compressed message, no conversion needed
         # swap bgr and rgb
-        zed_rgb_img = zed_rgb_img[:, :, ::-1]
+        zed_rgb_img = zed_rgb_img[:, :, ::-1] # Shape is (H, W, 3)
+        # self.get_logger().info(f"Zed rgb image shape: {zed_rgb_img.shape}")
+        if self.zed_crop:
+            zed_rgb_img = zed_rgb_img[:, :400, :]
 
-        # print the image size
-        
-        if self.center_crop:
-            zed_rgb_img = self.center_crop_rgb_frames(zed_rgb_img, self.ZED_CROP_SIZE)
-
-        # apply matt crop
-        zed_rgb_img = zed_rgb_img[:, :400, :]
-
-    
         zed_rgb_img = self.resize_for_policy(zed_rgb_img, 'zed_rgb')
-
-        
 
         self.zed_rgb_buffer.append((zed_rgb_img, time.monotonic() - self.start_time))
         if len(self.zed_rgb_buffer) > self.observation_horizon:
@@ -388,54 +399,51 @@ class PolicyNode3D(Node):
         rs_img = self._bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
         # Image is already in BGR format from compressed message, no conversion needed
         # swap bgr and rgb
-        rs_img = rs_img[:, :, ::-1]
-
-        if self.center_crop:
-            rs_img = self.center_crop_rgb_frames(rs_img, self.RS_CROP_SIZE)
+        rs_img = rs_img[:, :, ::-1] # Shape is (H, W, 3)
+        # self.get_logger().info(f"Rs rgb image shape: {rs_img.shape}")
+        if self.rs_side_crop:
+            rs_img = rs_img[160:320, :640, :]
         rs_img = self.resize_for_policy(rs_img, 'rs_side_rgb')
 
         self.rs_color_buffer.append((rs_img, time.monotonic() - self.start_time))
         if len(self.rs_color_buffer) > self.observation_horizon:
             self.rs_color_buffer.pop(0)
 
-    def zed_depth_callback(self, msg):
-        """Process zed depth message"""
-        zed_depth_img = self._bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1')
+    def zed_depth_compressed_callback(self, msg):
+        """Process zed depth compressed message"""
+        zed_depth_img = self._bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='32FC1')
         zed_depth_img = self.resize_for_policy(zed_depth_img, 'zed_depth_images')
 
         self.zed_depth_buffer.append((zed_depth_img, time.monotonic() - self.start_time))
         if len(self.zed_depth_buffer) > self.observation_horizon:
             self.zed_depth_buffer.pop(0)
 
-    def rs_rgb_callback(self, msg):
-        """Process rs rgb message"""
-        rs_img = self._bridge.imgmsg_to_cv2(msg)
-        if self.center_crop:
-            rs_img = self.center_crop_rgb_frames(rs_img, self.RS_CROP_SIZE)
-        rs_img = self.resize_for_policy(rs_img, 'rs_side_rgb')
+    def dt_left_compressed_callback(self, msg):
+        """Process dt left compressed message"""
+        dt_left_img = self._bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8') 
+        # self.get_logger().info(f"Dt left image shape: {dt_left_img.shape}")
+        if self.dt_left_crop:
+            dt_left_img = dt_left_img[:, 50:300, :]
 
-        self.rs_color_buffer.append((rs_img, time.monotonic() - self.start_time))
-        if len(self.rs_color_buffer) > self.observation_horizon:
-            self.rs_color_buffer.pop(0)
-
-    def dt_left_callback(self, msg):
-        """Process dt left message"""
-        dt_left_img = self._bridge.imgmsg_to_cv2(msg)
         dt_left_img = self.resize_for_policy(dt_left_img, 'dt_left')
 
         self.dt_left_buffer.append((dt_left_img, time.monotonic() - self.start_time))
         if len(self.dt_left_buffer) > self.observation_horizon:
             self.dt_left_buffer.pop(0)
 
-    def dt_right_callback(self, msg):
-        """Process dt right message"""
-        dt_right_img = self._bridge.imgmsg_to_cv2(msg)
-        dt_right_img = self.resize_for_policy(dt_right_img, 'dt_right')
+    def dt_right_compressed_callback(self, msg):
+        """Process dt right compressed message"""
+        dt_right_img = self._bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        # self.get_logger().info(f"Dt right image shape: {dt_right_img.shape}")
+        if self.dt_right_crop:
+            dt_right_img = dt_right_img[:, 50:300, :]
+
+        dt_right_img = self.resize_for_policy(dt_right_img, 'dt_right') 
 
         self.dt_right_buffer.append((dt_right_img, time.monotonic() - self.start_time))
         if len(self.dt_right_buffer) > self.observation_horizon:
             self.dt_right_buffer.pop(0)
-            
+
     def resize_for_policy(self, img: np.ndarray, cam_key: str) -> np.ndarray:
         """
         Resize *and* change layout from HWC-BGR (OpenCV) to CHW-RGB according to `shape_meta`.
@@ -448,40 +456,6 @@ class PolicyNode3D(Node):
         assert img.shape == (C, H, W), \
             f"{cam_key} expected {(C,H,W)}, got {img.shape}"
         return img
-    
-    def center_crop_rgb_frames(self, rgb_img: np.ndarray, crop_size: Tuple[int,int]) -> np.ndarray:
-        """
-        Center crop a single RGB image to target size.
-        
-        Args:
-            rgb_img: Input image in HWC format (H, W, C)
-            crop_size: Target crop size as (width, height)
-        
-        Returns:
-            Cropped image in HWC format
-        """
-        crop_w, crop_h = crop_size
-        
-        # Input should be (H, W, C) for OpenCV images
-        if rgb_img.ndim != 3:
-            raise ValueError(f"Expected (H, W, C), got {rgb_img.shape}")
-        
-        H, W, C = rgb_img.shape
-        
-        # Check if crop size is valid
-        if crop_h > H or crop_w > W:
-            raise ValueError(f"Crop size ({crop_h}, {crop_w}) larger than image size ({H}, {W})")
-        
-        # Calculate center crop coordinates
-        start_y = (H - crop_h) // 2
-        start_x = (W - crop_w) // 2
-        end_y = start_y + crop_h
-        end_x = start_x + crop_w
-        
-        # Crop the image
-        cropped_img = rgb_img[start_y:end_y, start_x:end_x, :]
-        
-        return cropped_img
 
 
 def inference_loop(model_path, shared_obs, action_queue, action_horizon = 4, device = "cuda", start_time = 0):
@@ -561,7 +535,7 @@ def inference_loop(model_path, shared_obs, action_queue, action_horizon = 4, dev
         prep_time = time.time() - prep_start_time
 
         # Save the most recent observation for debugging
-        save_data(obs)
+        save_data(obs, debug_dir=DEBUG_DIR)
 
         # Predict an action-horizon batch
         inference_start_time = time.time()
@@ -575,39 +549,7 @@ def inference_loop(model_path, shared_obs, action_queue, action_horizon = 4, dev
         q_actions = [actions[1]]
 
         # Print observation
-        detailed_debug_summary(obs, q_actions, start_time)
-
-
-        # t_start = time.monotonic()
-        # dt = 1/5.0
-        # action_timestamps = np.array([t_start + (i+1) * dt for i in range(len(q_actions))])
-        # current_time = time.monotonic()
-
-        # action_exec_latency = 0.1 
-
-        # env_actions = q_actions.copy()
-
-        # # Filter out any actions that would be executed too soon.
-        # valid_idx = action_timestamps > (current_time + action_exec_latency)
-        # if np.sum(valid_idx) == 0:
-        #     # If no actions remain valid, use the last action and schedule it for the next slot.
-        #     next_step_idx = int(np.ceil((current_time - t_start) / dt))
-        #     action_timestamps = np.array([t_start + next_step_idx * dt])
-        #     env_actions = env_actions[-1:]
-        #     print("No actions remain valid, using the last action and scheduling it for the next slot.")
-        # else:
-        #     env_actions = env_actions[valid_idx]
-        #     action_timestamps = action_timestamps[valid_idx]
-
-        # # let's first empty the action queue
-        # while not action_queue.empty():
-        #     print("Emptying action queue")
-        #     action_queue.get()
-
-        # for act, ts in zip(env_actions, action_timestamps):
-        #     action_queue.put((act, ts))
-
-        # queue_time = time.time() - t_start
+        log_policy(obs, q_actions, start_time)
 
         # # Fill the queue
         queue_start_time = time.time()
@@ -678,20 +620,7 @@ def load_shape_meta(model_path: str):
     payload = torch.load(path.open("rb"), pickle_module=dill, map_location="cpu")
     return payload["cfg"].policy.shape_meta      # <-- C,H,W per observation key
 
-# def monitor_keys(policy_node):
-#     """Monitor keyboard input for robot control"""
-#     while True:
-#         for event in pygame.event.get():
-#             if event.type == pygame.KEYDOWN: 
-#                 if event.key == pygame.K_p:
-#                     policy_node.pause_policy()
-#                 elif event.key == pygame.K_u:
-#                     policy_node.resume_policy()
-#                 elif event.key == pygame.K_r:
-#                     policy_node.reset_xarm()
-#         time.sleep(0.01)
-
-def detailed_debug_summary(obs, actions, start_time, *, max_channels=6):
+def log_policy(obs, actions, start_time, *, max_channels=6):
     def _shape(x):
         return tuple(x.shape) if hasattr(x, "shape") else f"(len={len(x)})"
 
@@ -727,6 +656,18 @@ def detailed_debug_summary(obs, actions, start_time, *, max_channels=6):
         for ind, curr_obs in enumerate(obs["rs_side_rgb"][0]):
             rs_rgb_timestamp = obs["rs_rgb_timestamps"][ind]
             print(f"RealSense RGB Image {ind + 1}: Shape = {curr_obs.shape} | Timestamp = {rs_rgb_timestamp}")
+
+    if "dt_left" in obs and isinstance(obs["dt_left"], torch.Tensor):
+        print()
+        for ind, curr_obs in enumerate(obs["dt_left"][0]):
+            dt_left_timestamp = obs["dt_left_timestamps"][ind]
+            print(f"DT Left Image {ind + 1}: Shape = {curr_obs.shape} | Timestamp = {dt_left_timestamp}")
+            
+    if "dt_right" in obs and isinstance(obs["dt_right"], torch.Tensor):
+        print()
+        for ind, curr_obs in enumerate(obs["dt_right"][0]):
+            dt_right_timestamp = obs["dt_right_timestamps"][ind]
+            print(f"DT Right Image {ind + 1}: Shape = {curr_obs.shape} | Timestamp = {dt_right_timestamp}")
 
     if actions is not None:
         print(f"\nActions to be published\n{'-'*80}")
@@ -771,17 +712,28 @@ def save_data(obs_dict=None, debug_dir=Path("../inference/2d_dp_debug")):
 
             cv2.imwrite(str(debug_dir/f"zed_rgb.jpg"), zed_img)
 
+    if "dt_left" in obs_dict and obs_dict["dt_left"] is not None:
+        dt_left_tensor = obs_dict["dt_left"]
+        if isinstance(dt_left_tensor, torch.Tensor):
+            dt_left_img = dt_left_tensor[0, -1].cpu().numpy()  # (3, H, W)
+            dt_left_hwc = np.transpose(dt_left_img, (1, 2, 0))  # now (H, W, 3)
+            dt_left_img = (dt_left_hwc * 255).astype(np.uint8)
+            cv2.imwrite(str(debug_dir/f"dt_left.jpg"), dt_left_img)
+
+    if "dt_right" in obs_dict and obs_dict["dt_right"] is not None:
+        dt_right_tensor = obs_dict["dt_right"]
+        if isinstance(dt_right_tensor, torch.Tensor):
+            dt_right_img = dt_right_tensor[0, -1].cpu().numpy()  # (3, H, W)
+            dt_right_hwc = np.transpose(dt_right_img, (1, 2, 0))  # now (H, W, 3)
+            dt_right_img = (dt_right_hwc * 255).astype(np.uint8)
+            cv2.imwrite(str(debug_dir/f"dt_right.jpg"), dt_right_img)
+
 
 def main(args=None):
     np.set_printoptions(suppress=True, precision=4)
     # Initialize multiprocessing
     multiprocessing.set_start_method('spawn', force=True)
     rclpy.init(args=args)
-    
-    # # Initialize Pygame for keyboard control
-    # pygame.init()
-    # pygame.display.set_mode((300, 200))
-    # pygame.display.set_caption("Robot Control")
     
     # Create shared memory structures
     manager = Manager()
@@ -790,7 +742,7 @@ def main(args=None):
     start_time = time.monotonic()
 
     # Model path
-    model_path = '/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/models/dt_vision.ckpt'
+    model_path = '/home/alex/Documents/3D-Diffusion-Policy/dt_ag/inference/models/vision_only_2000_epochs_bigger.ckpt'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     shape_meta = load_shape_meta(model_path)
 
@@ -807,17 +759,8 @@ def main(args=None):
     # Create ROS node
     node = PolicyNode3D(shared_obs, action_queue, start_time, shape_meta=shape_meta)
 
-    # Use MultiThreadedExecutor with enough threads
-    # executor = MultiThreadedExecutor(num_threads=4)
-    # executor.add_node(node)
-
-    # # Start key monitoring thread
-    # key_thread = threading.Thread(target=monitor_keys, args=(node,), daemon=True)
-    # key_thread.start()
-
     try:
         rclpy.spin(node)
-        # executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

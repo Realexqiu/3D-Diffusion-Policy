@@ -5,6 +5,7 @@ from sensor_msgs.msg import Image, CompressedImage
 import pyzed.sl as sl
 import cv2
 from cv_bridge import CvBridge
+import numpy as np
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 class ZedImagePublisher(Node):
@@ -15,8 +16,8 @@ class ZedImagePublisher(Node):
 
         # Create publishers for RGB, depth, and compressed RGB images
         self.rgb_publisher = self.create_publisher(Image, 'zed_image/rgb', sensor_qos)
-        self.depth_publisher = self.create_publisher(Image, 'zed_image/depth', sensor_qos)
         self.compressed_rgb_publisher = self.create_publisher(CompressedImage, 'zed_image/rgb/compressed', sensor_qos)
+        self.compressed_depth_publisher = self.create_publisher(CompressedImage, 'zed_image/depth/compressed', sensor_qos)
 
         self.bridge = CvBridge()
         # Timer for grabbing and publishing images
@@ -47,39 +48,45 @@ class ZedImagePublisher(Node):
 
         self.get_logger().info("ZED camera initialized.")
 
-        # # ==========================================================
-        # # (B) Retrieve and log camera calibration information
-        # # ==========================================================
-        # camera_information = self.zed_cam.get_camera_information()
-        # calibration_params = camera_information.camera_configuration.calibration_parameters
+        # # 1) Disable auto‐exposure/gain so manual settings take effect:
+        # self.zed_cam.set_camera_settings(sl.VIDEO_SETTINGS.AEC_AGC, 0)
 
-        # # Access intrinsic parameters for the left camera
-        # left_cam_intrinsics = calibration_params.left_cam
-        # focal_left_x = left_cam_intrinsics.fx
-        # focal_left_y = left_cam_intrinsics.fy
-        # principal_point_left_x = left_cam_intrinsics.cx
-        # principal_point_left_y = left_cam_intrinsics.cy
-        # distortion_coeffs_left = left_cam_intrinsics.disto # Radial and tangential distortion coefficients
+        # # 2) Increase brightness (range is 0–8; 8 is maximum):
+        # self.zed_cam.set_camera_settings(sl.VIDEO_SETTINGS.BRIGHTNESS, 2)
 
-        # # Access stereo parameters
-        # baseline_translation_x = calibration_params.stereo_transform.get_translation().get()[0] # Translation between left and right eye on x-axis (baseline)
-        # # Note: ZED SDK provides baseline directly as tx
+        # ==========================================================
+        # (B) Retrieve and log camera calibration information
+        # ==========================================================
+        camera_information = self.zed_cam.get_camera_information()
+        calibration_params = camera_information.camera_configuration.calibration_parameters
 
-        # # Log the calibration information
-        # self.get_logger().info("--- Camera Calibration Parameters (Left Camera) ---")
-        # self.get_logger().info(f"Focal Length (fx): {focal_left_x}")
-        # self.get_logger().info(f"Focal Length (fy): {focal_left_y}")
-        # self.get_logger().info(f"Principal Point (cx): {principal_point_left_x}")
-        # self.get_logger().info(f"Principal Point (cy): {principal_point_left_y}")
-        # self.get_logger().info(f"Distortion Coefficients (k1, k2, p1, p2, k3): {distortion_coeffs_left}")
-        # self.get_logger().info(f"Stereo Baseline (tx): {baseline_translation_x} meters")
-        # self.get_logger().info("-------------------------------------------------")
+        # Access intrinsic parameters for the left camera
+        left_cam_intrinsics = calibration_params.left_cam
+        focal_left_x = left_cam_intrinsics.fx
+        focal_left_y = left_cam_intrinsics.fy
+        principal_point_left_x = left_cam_intrinsics.cx
+        principal_point_left_y = left_cam_intrinsics.cy
+        distortion_coeffs_left = left_cam_intrinsics.disto # Radial and tangential distortion coefficients
+
+        # Access stereo parameters
+        baseline_translation_x = calibration_params.stereo_transform.get_translation().get()[0] # Translation between left and right eye on x-axis (baseline)
+        # Note: ZED SDK provides baseline directly as tx
+
+        # Log the calibration information
+        self.get_logger().info("--- Camera Calibration Parameters (Left Camera) ---")
+        self.get_logger().info(f"Focal Length (fx): {focal_left_x}")
+        self.get_logger().info(f"Focal Length (fy): {focal_left_y}")
+        self.get_logger().info(f"Principal Point (cx): {principal_point_left_x}")
+        self.get_logger().info(f"Principal Point (cy): {principal_point_left_y}")
+        self.get_logger().info(f"Distortion Coefficients (k1, k2, p1, p2, k3): {distortion_coeffs_left}")
+        self.get_logger().info(f"Stereo Baseline (tx): {baseline_translation_x} meters")
+        self.get_logger().info("-------------------------------------------------")
 
 
         self.zed_left_image = sl.Mat()
         self.zed_depth_map = sl.Mat()
         # Define the desired resolution for retrieval
-        self.desired_res = sl.Resolution(640, 360) 
+        self.desired_res = sl.Resolution(640, 360) # 1280x720 resolution
 
     def timer_callback(self):
         # Grab a new frame from the ZED camera
@@ -97,37 +104,46 @@ class ZedImagePublisher(Node):
             try:
                 # Convert OpenCV images to ROS Image messages
                 # Use bgr8 encoding for color image
-                rgb_msg = self.bridge.cv2_to_imgmsg(frame_bgr, encoding="bgr8")
-                # Use 32FC1 encoding for depth map (float 32-bit, 1 channel)
-                depth_msg = self.bridge.cv2_to_imgmsg(depth_data, encoding="32FC1")
+                # rgb_msg = self.bridge.cv2_to_imgmsg(frame_bgr, encoding="bgr8")
+                depth16 = (depth_data*1000).astype(np.uint16)
+
+                # Encode the BGR image as JPEG
+                success_rgb, encoded_image = cv2.imencode('.jpg', frame_bgr, self.encode_params)        
+                success_depth, png = cv2.imencode(".png", depth16, [cv2.IMWRITE_PNG_COMPRESSION,3])
 
                 # Create compressed RGB image
                 compressed_rgb_msg = CompressedImage()
+                compressed_depth_image = CompressedImage()
                 
-                # Encode the BGR image as JPEG
-                success, encoded_image = cv2.imencode('.jpg', frame_bgr, self.encode_params)
-                if success:
+                if success_rgb:
                     compressed_rgb_msg.data = encoded_image.tobytes()
                     compressed_rgb_msg.format = "jpeg"
                 else:
                     self.get_logger().error("Failed to encode image as JPEG")
                     return
+                
+                if success_depth:
+                    compressed_depth_image.data = png.tobytes()
+                    compressed_depth_image.format = "16UC1"
+                else:
+                    self.get_logger().error("Failed to encode depth image as 16UC1")
+                    return
 
                 # Set headers with current time and frame_id
                 current_time = self.get_clock().now().to_msg()
 
-                rgb_msg.header.stamp = current_time
-                rgb_msg.header.frame_id = "zed_camera" # Consistent frame ID
+                # rgb_msg.header.stamp = current_time
+                # rgb_msg.header.frame_id = "zed_camera" # Consistent frame ID
 
-                depth_msg.header.stamp = current_time
-                depth_msg.header.frame_id = "zed_camera" # Consistent frame ID
+                compressed_depth_image.header.stamp = current_time
+                compressed_depth_image.header.frame_id = "zed_camera" # Consistent frame ID
 
                 compressed_rgb_msg.header.stamp = current_time
                 compressed_rgb_msg.header.frame_id = "zed_camera" # Consistent frame ID
 
                 # Publish messages
-                self.rgb_publisher.publish(rgb_msg)
-                self.depth_publisher.publish(depth_msg)
+                # self.rgb_publisher.publish(rgb_msg)
+                self.compressed_depth_publisher.publish(compressed_depth_image)
                 self.compressed_rgb_publisher.publish(compressed_rgb_msg)
 
                 self.get_logger().debug("Published ZED RGB, depth, and compressed RGB images.")

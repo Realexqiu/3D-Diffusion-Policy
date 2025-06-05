@@ -49,11 +49,27 @@ def generate_launch_description():
         Node(
             package='realsense2_camera',
             executable='realsense2_camera_node',
+            name='rs_front',
+            namespace='rs_front',
+            output='screen',
+            parameters=[{
+                'serial_no': '317222074068', # unique to side camera
+                'camera_name': 'rs_front',
+                'enable_color': True,
+                'enable_depth': False,
+                'rgb_camera.color_profile': '640x360x30',
+            }]
+        ),
+
+        # RealSense #2  → namespace /camera2
+        Node(
+            package='realsense2_camera',
+            executable='realsense2_camera_node',
             name='rs_side',
             namespace='rs_side',
             output='screen',
             parameters=[{
-                'serial_no': '317222074068', # unique to side camera
+                'serial_no': '040322073693', # unique to side camera
                 'camera_name': 'rs_side',
                 'enable_color': True,
                 'enable_depth': False,

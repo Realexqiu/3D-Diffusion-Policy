@@ -1,5 +1,6 @@
 # diffusion_policy/dataset/xarm_2d_dataset.py
 from typing import Dict, List, Tuple, Optional
+import time
 import numpy as np
 import torch
 import copy
@@ -8,17 +9,19 @@ from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.common.normalize_util import get_image_range_normalizer
 from diffusion_policy.dataset.base_dataset import BaseImageDataset
-
+import cv2
+import os
 
 class XArmImageDataset2D(BaseImageDataset):
     """
     Dataset for *2-D* Diffusion Policy on your xArm recordings.
-    Each observation = RealSense RGB frame + 8-D pose.
+    Dynamically loads observations based on shape_meta configuration.
     """
 
     def __init__(
         self,
         zarr_path: str,
+        shape_meta: Dict[str, Dict] = None,
         horizon: int = 2,
         pad_before: int = 0,
         pad_after: int = 0,
@@ -27,6 +30,34 @@ class XArmImageDataset2D(BaseImageDataset):
         max_train_episodes: Optional[int] = None,
     ):
         super().__init__()
+        
+        # Parse shape_meta configuration
+        self.obs_config = {}
+        self.rgb_keys = []
+        self.non_rgb_keys = []
+        
+        if shape_meta is not None and 'obs' in shape_meta:
+            obs_meta = shape_meta['obs']
+            for key, meta in obs_meta.items():
+                self.obs_config[key] = meta
+                if meta.get('type') == 'rgb':
+                    self.rgb_keys.append(key)
+                else:
+                    self.non_rgb_keys.append(key)
+        else:
+            # Default configuration if no shape_meta provided
+            self.rgb_keys = ['rs_side_rgb', 'rs_front_rgb']
+            self.non_rgb_keys = ['pose']
+            self.obs_config = {
+                'rs_side_rgb': {'shape': [3, 160, 220], 'type': 'rgb'},
+                'rs_front_rgb': {'shape': [3, 160, 220], 'type': 'rgb'},
+                'pose': {'shape': [10]}
+            }
+        
+        print(f"Loaded observation config:")
+        print(f"  RGB keys: {self.rgb_keys}")
+        print(f"  Non-RGB keys: {self.non_rgb_keys}")
+        
         # Open the Zarr store
         self.root = zarr.open(zarr_path, mode="r")
 
@@ -53,12 +84,21 @@ class XArmImageDataset2D(BaseImageDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.index: List[Tuple[str,int]] = []
+        
         for epi in self.train_eps:
             grp = self.root[epi]
-            T = grp["rs_side_rgb"].shape[0]
-            T_zed = grp["zed_rgb"].shape[0]
-            for t in range(min(T, T_zed) - horizon):
-                self.index.append((epi, t))
+            # Find minimum length across all RGB observations
+            min_T = float('inf')
+            for rgb_key in self.rgb_keys:
+                if rgb_key in grp:
+                    T = grp[rgb_key].shape[0]
+                    min_T = min(min_T, T)
+                else:
+                    print(f"Warning: {rgb_key} not found in episode {epi}")
+            
+            if min_T > horizon:
+                for t in range(min_T - horizon):
+                    self.index.append((epi, t))
 
     def get_validation_dataset(self) -> "XArmImageDataset2D":
         # shallow copy, swap to validation episodes
@@ -66,123 +106,116 @@ class XArmImageDataset2D(BaseImageDataset):
         val_ds.index = []
         for epi in self.val_eps:
             grp = val_ds.root[epi]
-            T = grp["rs_side_rgb"].shape[0]
-            T_zed = grp["zed_rgb"].shape[0]
-            for t in range(min(T, T_zed) - val_ds.horizon):
-                val_ds.index.append((epi, t))
+            # Find minimum length across all RGB observations
+            min_T = float('inf')
+            for rgb_key in val_ds.rgb_keys:
+                if rgb_key in grp:
+                    T = grp[rgb_key].shape[0]
+                    min_T = min(min_T, T)
+            
+            if min_T > val_ds.horizon:
+                for t in range(min_T - val_ds.horizon):
+                    val_ds.index.append((epi, t))
         return val_ds
 
     def __len__(self) -> int:
         return len(self.index)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        # import pdb; pdb.set_trace()
         epi, t0 = self.index[idx]
         grp = self.root[epi]
         sl = slice(t0, t0 + self.horizon)
 
-        # Load RGB frames
-        rs_side_rgb = grp["rs_side_rgb"][sl]        # (H, h, w, 3)
-        zed_rgb = grp["zed_rgb"][sl]        # (H, h, w, 3)
-
-        # Agent positions and actions
-        pose = grp["pose"][sl]  # (H, 10)
-        action = grp["action"][sl]        # (H, 10)
-
-        # If your Zarr stores HWC, move channels to front; if it already stores CHW, do nothing.
-        if rs_side_rgb.ndim == 4 and rs_side_rgb.shape[-1] == 3:
-            # (T, H, W, C) -> (T, C, H, W)
-            rs_side_img = np.moveaxis(rs_side_rgb, -1, 1)
-            zed_img = np.moveaxis(zed_rgb, -1, 1)
-        else:
-            # assume already (T, C, H, W)
-            rs_side_img = rs_side_rgb
-            zed_img = zed_rgb
-
-        rs_side_img = rs_side_img.astype(np.float32) / 255.0
-        zed_img = zed_img.astype(np.float32) / 255.0
-
-        # Debug visualization - only show randomly every ~1000 samples
+        obs_dict = {}
+        
+        # Load RGB observations
+        for rgb_key in self.rgb_keys:
+            if rgb_key in grp:
+                rgb_data = grp[rgb_key][sl]  # (H, h, w, 3) or (H, 3, h, w)
+                
+                # If your Zarr stores HWC, move channels to front
+                if rgb_data.ndim == 4 and rgb_data.shape[-1] == 3:
+                    # (T, H, W, C) -> (T, C, H, W)
+                    rgb_img = np.moveaxis(rgb_data, -1, 1)
+                else:
+                    # assume already (T, C, H, W)
+                    rgb_img = rgb_data
+                
+                # Normalize to [0, 1]
+                rgb_img = rgb_img.astype(np.float32) / 255.0
+                obs_dict[rgb_key] = rgb_img
+        
+        # Load non-RGB observations (e.g., pose)
+        for key in self.non_rgb_keys:
+            if key in grp:
+                obs_dict[key] = grp[key][sl].astype(np.float32)
+        
+        # Load action
+        action = grp["action"][sl].astype(np.float32)
+        
+        # Debug visualization - save images every ~1000 samples
         if np.random.randint(0, 1000) == 0:
-            # print pose and action
-            print(pose[0])
-            # pose is xyz then 6D rotation
-
-            print(action[0])
-
-            # print shape of pose and action
-            print(pose.shape)
-            print(action.shape)
-
-            import pdb; pdb.set_trace()
-            import matplotlib.pyplot as plt
-            plt.imshow(np.transpose(rs_side_img[0], (1, 2, 0)))
-            plt.show()
-
-            # show zed_img
-            plt.imshow(np.transpose(zed_img[0], (1, 2, 0)))
-            plt.show()
-
-            # let's save these images and pose and action
-            import cv2
-            import os
-
-            # Create a directory for saving images
             save_dir = "debug_images"
             os.makedirs(save_dir, exist_ok=True)
             
-            # save rs_side_img
-            # resize image to save with cv2
-            # print image shape
-            print(rs_side_img[0].shape)
-            # shape is (3, 180, 220)
-            # reshape to (180, 220, 3)
-            rs_side_img_resized = np.transpose(rs_side_img[0], (1, 2, 0))
-            cv2.imwrite(os.path.join(save_dir, "rs_side_img.png"), rs_side_img_resized)
-
-            # save zed_img
-            # resize image to save with cv2
-            # print image shape
-            print(zed_img[0].shape)
-            # shape is (3, 180, 220)
-            # reshape to (180, 220, 3)
-            zed_img_resized = np.transpose(zed_img[0], (1, 2, 0))
-            cv2.imwrite(os.path.join(save_dir, "zed_img.png"), zed_img_resized)
+            # Save action and non-RGB observations
+            np.save(os.path.join(save_dir, "action.npy"), action)
+            for key in self.non_rgb_keys:
+                if key in obs_dict:
+                    np.save(os.path.join(save_dir, f"{key}.npy"), obs_dict[key])
             
-            # save pose
-            np.save(os.path.join(save_dir, "pose.npy"), pose[0])
-
-            # save action
-            np.save(os.path.join(save_dir, "action.npy"), action[0])
-
- 
-
+            # Save the last frame from each RGB camera
+            for rgb_key in self.rgb_keys:
+                if rgb_key in obs_dict:
+                    rgb_img_last = obs_dict[rgb_key][-1]
+                    
+                    # Convert from (C, H, W) to (H, W, C) and scale to uint8
+                    rgb_img_save = (np.transpose(rgb_img_last, (1, 2, 0)) * 255).astype(np.uint8)
+                    
+                    # Convert RGB to BGR for cv2
+                    rgb_img_save = cv2.cvtColor(rgb_img_save, cv2.COLOR_RGB2BGR)
+                    
+                    # Save the image
+                    cv2.imwrite(os.path.join(save_dir, f"{rgb_key}.png"), rgb_img_save)
+                    
+                    # print(f"{rgb_key} shape: {obs_dict[rgb_key].shape}")
+            
+            # print(f"Debug data saved to {save_dir}/")
+            # print(f"action shape: {action.shape}")
 
         sample = {
-            "obs": {
-                "rs_side_rgb": rs_side_img,
-                "zed_rgb": zed_img,
-                "pose": pose.astype(np.float32),
-            },
-            "action": action.astype(np.float32),
+            "obs": obs_dict,
+            "action": action,
         }
         return dict_apply(sample, torch.from_numpy)
 
     def get_normalizer(self, mode: str = "limits", **kwargs):
-        # Gather all agent_pos and actions from training episodes
-        poses = []
+        # Gather data for normalization
+        data_dict = {}
+        
+        # Collect non-RGB observations
+        for key in self.non_rgb_keys:
+            data_list = []
+            for epi in self.train_eps:
+                grp = self.root[epi]
+                if key in grp:
+                    data_list.append(grp[key][...])
+            if data_list:
+                data_dict[key] = np.concatenate(data_list, axis=0)
+        
+        # Collect actions
         acts = []
         for epi in self.train_eps:
             grp = self.root[epi]
-            poses.append(grp["pose"][...])
             acts.append(grp["action"][...])
-        poses = np.concatenate(poses, axis=0)
-        acts = np.concatenate(acts, axis=0)
-        data = {"pose": poses, "action": acts}
+        data_dict["action"] = np.concatenate(acts, axis=0)
+        
+        # Create normalizer
         normalizer = LinearNormalizer()
-        normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
-        # Identity for image range
-        normalizer["rs_side_rgb"] = get_image_range_normalizer()
-        # normalizer["rs_wrist_rgb"] = get_image_range_normalizer()
-        normalizer["zed_rgb"] = get_image_range_normalizer()
+        normalizer.fit(data=data_dict, last_n_dims=1, mode=mode, **kwargs)
+        
+        # Add identity normalizers for RGB images
+        for rgb_key in self.rgb_keys:
+            normalizer[rgb_key] = get_image_range_normalizer()
+        
         return normalizer

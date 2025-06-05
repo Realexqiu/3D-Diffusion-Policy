@@ -34,24 +34,48 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # RealSense #1  → namespace /camera1
-        # Node(
-        #     package='realsense2_camera',
-        #     executable='realsense2_camera_node',
-        #     name='rs_wrist',
-        #     namespace='rs_wrist',
-        #     output='screen',
-        #     parameters=[{
-        #         # change these to your desired resolution / FPS
-        #         'serial_no': '317222074520', # unique to wrist camera
-        #         'camera_name': 'rs_wrist',
-        #         'enable_color': True,
-        #         'enable_depth': False,
-        #         'rgb_camera.color_profile': '640x360x15',
-        #     }]
-        # ),
+        # RealSense #1  → namespace/camera1
+        Node(
+            package='realsense2_camera',
+            executable='realsense2_camera_node',
+            name='rs_wrist',
+            namespace='rs_wrist',
+            output='screen',
+            parameters=[{
+                # change these to your desired resolution / FPS
+                'serial_no': '317222074520', # unique to wrist camera
+                'camera_name': 'rs_wrist',
+                'enable_color': True,
+                'enable_depth': False,
+                'enable_infra1': False,
+                'enable_infra2': False,
+                'enable_gyro': False,
+                'enable_accel': False,
+                'rgb_camera.color_profile': '640x360x30',
+            }]
+        ),
 
         # RealSense #2  → namespace /camera2
+        Node(
+            package='realsense2_camera',
+            executable='realsense2_camera_node',
+            name='rs_front',
+            namespace='rs_front',
+            output='screen',
+            parameters=[{
+                'serial_no': '317222074068', # unique to front camera
+                'camera_name': 'rs_front',
+                'enable_color': True,
+                'enable_depth': False,
+                'enable_infra1': False,
+                'enable_infra2': False,
+                'enable_gyro': False,
+                'enable_accel': False,
+                'rgb_camera.color_profile': '640x360x30',
+            }]
+        ),
+
+        # RealSense #3  → namespace /camera3
         Node(
             package='realsense2_camera',
             executable='realsense2_camera_node',
@@ -59,11 +83,15 @@ def generate_launch_description():
             namespace='rs_side',
             output='screen',
             parameters=[{
-                'serial_no': '317222074068', # unique to side camera
+                'serial_no': '_040322073693', # unique to side camera
                 'camera_name': 'rs_side',
                 'enable_color': True,
                 'enable_depth': False,
-                'rgb_camera.color_profile': '640x360x15',
+                'enable_infra1': False,
+                'enable_infra2': False,
+                'enable_gyro': False,
+                'enable_accel': False,
+                'rgb_camera.color_profile': '640x360x30',
             }]
         ),
     ])

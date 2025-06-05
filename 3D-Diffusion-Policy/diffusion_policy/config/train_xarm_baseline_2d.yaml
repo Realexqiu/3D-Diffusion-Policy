@@ -71,8 +71,8 @@ ema:
 
 dataloader:
   batch_size: 64
-  num_workers: 0
-  persistent_workers: False
+  num_workers: 8
+  persistent_workers: True
 
 val_dataloader:
   batch_size: 64
@@ -91,7 +91,7 @@ training:
   num_epochs: 3001
   gradient_accumulate_every: 1
   use_ema: true
-  freeze_encoder: true
+  freeze_encoder: False
   lr_scheduler: cosine
   lr_warmup_steps: 500
   checkpoint_every: 100
