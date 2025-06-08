@@ -5,14 +5,18 @@ task_name:      xarm_baseline_2d
 # ------------------------------------------------------------------
 dataset:
   _target_: diffusion_policy.dataset.xarm_2d_dataset.XArmImageDataset2D
-  zarr_path: /home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_baseline/4_cam_baseline_zarr_rs_side+front_no_crop
+  zarr_path: /sailhome/swann/documents/dt_ag/dataset/2d_strawberry_baseline/4_cam_baseline_zarr_side_wrist_front_no_crop
   shape_meta: ${shape_meta}
-  horizon: 8                     # obs window
-  pad_before: 0                  # default for image dataset
-  pad_after: 0
+  horizon: 16                 # obs window
+  pad_before: 1                 # change to match matts code
+  pad_after: 7
   seed: 42
-  val_ratio: 0.0
+  val_ratio: 0.1
   max_train_episodes: null
+  preload: true                 # 🚀 NEW: Load entire dataset into RAM
+
+  # use_cache: True
+  # delta_action: False
 
 env_runner: null                 # offline BC only
 
@@ -26,14 +30,15 @@ shape_meta: &shape_meta
     rs_front_rgb:
       shape: [3, 160, 220]       # (C,H,W) after your resize script
       type: rgb
-    # # rs_wrist_rgb:
-    # #   shape: [3, 240, 360]       # (C,H,W) after your resize script
-    # #   type: rgb
+    # rs_wrist_rgb:
+    #   shape: [3, 160, 220]       # (C,H,W) after your resize script
+    #   type: rgb
     # zed_rgb:
     #   shape: [3, 160, 220]       # (C,H,W) after your resize script
     #   type: rgb
     pose:
       shape: [10]                 # x y z 6d_pose gripper
+      type: low_dim
 
   action:
     shape: [10]

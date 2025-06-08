@@ -260,12 +260,29 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                             train_sampling_batch = {k: v.clone() if torch.is_tensor(v) else v 
                                                   for k, v in batch.items()}
 
-                        # compute loss
-                        raw_loss = self.model.compute_loss(batch)
-                        loss = raw_loss / cfg.training.gradient_accumulate_every
+                        # # compute loss
+                        # raw_loss = self.model.compute_loss(batch)
+                        # loss = raw_loss / cfg.training.gradient_accumulate_every
                         
+                        # # compute loss - handle both DDP and non-DDP cases
+                        # if hasattr(self.model, 'module'):
+                        #     # DistributedDataParallel wrapped model
+                        #     raw_loss = self.model(batch)  # DDP forwards calls to the underlying module
+                        # else:
+                        #     # Regular model
+                        #     raw_loss = self.model(batch)
+
+                        raw_loss = accelerator.unwrap_model(self.model).compute_loss(batch)
+
+
+                        # Alternative if your model uses compute_loss instead of __call__/forward:
+                        # raw_loss = accelerator.unwrap_model(self.model).compute_loss(batch)
+
+                        loss = raw_loss / cfg.training.gradient_accumulate_every
+                        accelerator.backward(loss)  # Use accelerator.backward instead of loss.backward()
+
                         # Use accelerator.backward instead of loss.backward()
-                        accelerator.backward(loss)
+                        # accelerator.backward(loss)
 
                         # step optimizer
                         if self.global_step % cfg.training.gradient_accumulate_every == 0:
@@ -274,8 +291,12 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                             lr_scheduler.step()
                         
                         # update ema
+                        # if cfg.training.use_ema:
+                        #     ema.step(self.model)
+
+                        # update ema
                         if cfg.training.use_ema:
-                            ema.step(self.model)
+                            ema.step(accelerator.unwrap_model(self.model))
 
                         # logging
                         raw_loss_cpu = raw_loss.item()

@@ -1,12 +1,10 @@
-if __name__ == "__main__":
-    import sys
-    import os
-    import pathlib
+import sys
+import os
+import pathlib
 
-    ROOT_DIR = str(pathlib.Path(__file__).parent.parent.parent)
-    sys.path.append(ROOT_DIR)
-    os.chdir(ROOT_DIR)
-
+ROOT_DIR = str(pathlib.Path(__file__).parent.parent.parent)
+sys.path.append(ROOT_DIR)
+os.chdir(ROOT_DIR)
 
 import os
 import hydra
@@ -24,7 +22,7 @@ import shutil
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from diffusion_policy.dataset.base_dataset import BaseImageDataset
-from diffusion_policy.env_runner.base_image_runner import BaseImageRunner
+# from diffusion_policy.env_runner.base_image_runner import BaseImageRunner
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
@@ -227,10 +225,24 @@ class TrainDiffusionUnetImageMultiWorkspace(BaseWorkspace):
                         # always use the latest batch
                         train_sampling_batch = batch
 
-                        # compute loss
-                        raw_loss = self.model(batch)
+                        # # compute loss
+                        # raw_loss = self.model(batch)
+                        # loss = raw_loss / cfg.training.gradient_accumulate_every
+                        # loss.backward()
+
+                        # compute loss - handle both DDP and non-DDP cases
+                        if hasattr(self.model, 'module'):
+                            # DistributedDataParallel wrapped model
+                            raw_loss = self.model(batch)  # DDP forwards calls to the underlying module
+                        else:
+                            # Regular model
+                            raw_loss = self.model(batch)
+
+                        # Alternative if your model uses compute_loss instead of __call__/forward:
+                        # raw_loss = accelerator.unwrap_model(self.model).compute_loss(batch)
+
                         loss = raw_loss / cfg.training.gradient_accumulate_every
-                        loss.backward()
+                        accelerator.backward(loss)  # Use accelerator.backward instead of loss.backward()
 
                         # step optimizer
                         if self.global_step % cfg.training.gradient_accumulate_every == 0:

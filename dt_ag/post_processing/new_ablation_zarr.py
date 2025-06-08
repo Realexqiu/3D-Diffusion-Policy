@@ -26,10 +26,10 @@ from rich.table import Table
 #  Configuration
 # ────────────────────────────────────────────────────────────────
 # Input Zarr dataset path
-INPUT_ZARR_DIR = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_baseline/4_cam_baseline_zarr")
+INPUT_ZARR_DIR = Path("/sailhome/swann/documents/dt_ag/dataset/2d_strawberry_baseline/4_cam_baseline_zarr")
 
 # Output Zarr dataset path
-OUTPUT_ZARR_DIR = Path("/home/alex/Documents/3D-Diffusion-Policy/dt_ag/data/2d_strawberry_baseline/4_cam_baseline_zarr_rs_side+front_no_crop")
+OUTPUT_ZARR_DIR = Path("/sailhome/swann/documents/dt_ag/dataset/2d_strawberry_baseline/4_cam_baseline_zarr_side_wrist_front_no_crop")
 
 # Resize settings
 ENABLE_RESIZE = True  # Set to False to keep original resolution
@@ -499,7 +499,7 @@ def main() -> None:
             CONSOLE.log(f"[blue]Processing {episode_name}")
             
             # Create an array of names of data that we want for this ablation and load data
-            desired_data_names = ['rs_side_rgb', 'rs_front_rgb', 'pose', 'action']
+            desired_data_names = ['rs_side_rgb', 'rs_front_rgb', 'rs_wrist_rgb', 'pose', 'action']
             input_episode = input_root[episode_name]
             desired_data = {name: input_episode[name][:] for name in desired_data_names}
             T = desired_data['pose'].shape[0]
