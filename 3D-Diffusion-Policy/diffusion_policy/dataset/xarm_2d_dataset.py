@@ -254,8 +254,15 @@ class XArmImageDataset2D(BaseImageDataset):
         val_ratio: float = 0.0,
         max_train_episodes: Optional[int] = None,
         preload: bool = True,  # NEW: Enable full RAM preloading
+        pose_noise_std: float = 0.0,  # Standard deviation for pose noise
+        pose_noise_prob: float = 0.0,  # Probability of applying noise
     ):
         super().__init__()
+        
+        # Store noise augmentation parameters
+        self.pose_noise_std = pose_noise_std
+        self.pose_noise_prob = pose_noise_prob
+        self.is_training = True  # Track if we're in training mode
         
         self.preload = preload
         self.preloaded_data = {}  # Will store all episodes if preloading
@@ -286,6 +293,14 @@ class XArmImageDataset2D(BaseImageDataset):
         print(f"Loaded observation config:")
         print(f"  RGB keys: {self.rgb_keys}")
         print(f"  Non-RGB keys: {self.non_rgb_keys}")
+        
+        # Print noise augmentation configuration
+        if self.pose_noise_std > 0.0 and self.pose_noise_prob > 0.0:
+            print(f"  Pose noise augmentation enabled:")
+            print(f"    - Standard deviation: {self.pose_noise_std}")
+            print(f"    - Probability: {self.pose_noise_prob}")
+        else:
+            print(f"  Pose noise augmentation disabled")
         
         # Open the Zarr store
         self.root = zarr.open(zarr_path, mode="r")
@@ -411,6 +426,7 @@ class XArmImageDataset2D(BaseImageDataset):
         """Create validation dataset - shares preloaded data if available"""
         val_ds = copy.copy(self)
         val_ds.index = []
+        val_ds.is_training = False  # Disable noise augmentation for validation
         
         for epi in self.val_eps:
             if self.preload:
@@ -426,6 +442,29 @@ class XArmImageDataset2D(BaseImageDataset):
 
     def __len__(self) -> int:
         return len(self.index)
+
+    # def _apply_pose_noise(self, obs_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    #     """Apply random Gaussian noise to pose observations during training"""
+    #     if not self.is_training or self.pose_noise_std <= 0.0:
+    #         return obs_dict
+        
+    #     # Apply noise with given probability
+    #     if np.random.random() > self.pose_noise_prob:
+    #         return obs_dict
+        
+    #     # Create a copy to avoid modifying the original data
+    #     noisy_obs_dict = obs_dict.copy()
+        
+    #     # Apply noise to pose-like observations (low_dim type)
+    #     for key in self.non_rgb_keys:
+    #         if key in obs_dict and key in self.obs_config:
+    #             obs_type = self.obs_config[key].get('type', '')
+    #             if obs_type == 'low_dim' and 'pose' in key.lower():
+    #                 # Apply Gaussian noise to pose data
+    #                 noise = np.random.normal(0, self.pose_noise_std, obs_dict[key].shape)
+    #                 noisy_obs_dict[key] = obs_dict[key] + noise.astype(obs_dict[key].dtype)
+        
+    #     return noisy_obs_dict
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         epi, t0 = self.index[idx]
@@ -471,6 +510,9 @@ class XArmImageDataset2D(BaseImageDataset):
             
             # Load action
             action = grp["action"][sl].astype(np.float32)
+
+        # Apply noise augmentation to pose data during training
+        # obs_dict = self._apply_pose_noise(obs_dict)
 
         sample = {
             "obs": obs_dict,

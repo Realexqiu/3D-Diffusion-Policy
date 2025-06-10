@@ -70,11 +70,16 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         if accelerator.is_main_process and cfg.logging.mode == 'online':
             wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
             project_name = wandb_cfg.pop('project')
+
             accelerator.init_trackers(
                 project_name=project_name,
                 config=OmegaConf.to_container(cfg, resolve=True),
                 init_kwargs={"wandb": wandb_cfg}
             )
+
+            task_name = cfg.get('exp_name', 'unknown_task')
+            wandb.run.name = f"{task_name}_{wandb.run.name}"
+            wandb.run.tags = wandb.run.tags + (f"exp_name:{task_name}",)
 
         # resume training
         if cfg.training.resume:

@@ -2,6 +2,8 @@
 name:           xarm_baseline_2d       # shows up in log dirs
 task_name:      xarm_baseline_2d
 
+action_horizon: 16
+
 # ------------------------------------------------------------------
 dataset:
   _target_: diffusion_policy.dataset.xarm_2d_dataset.XArmImageDataset2D
@@ -14,6 +16,10 @@ dataset:
   val_ratio: 0.1
   max_train_episodes: null
   preload: true                 # 🚀 NEW: Load entire dataset into RAM
+  
+  # # Noise augmentation for training robustness
+  # pose_noise_std: 0.0    # Standard deviation for Gaussian noise on pose data
+  # pose_noise_prob: 0.0          # Probability of applying noise (0.0 = never, 1.0 = always)
 
   # use_cache: True
   # delta_action: False
@@ -24,21 +30,22 @@ env_runner: null                 # offline BC only
 # Shapes for encoder and diffusion head
 shape_meta: &shape_meta
   obs:
-    rs_side_rgb:
-      shape: [3, 160, 220]       # (C,H,W) after your resize script
-      type: rgb
+    # rs_side_rgb:
+    #   shape: [3, 160, 220]       # (C,H,W) after your resize script
+    #   type: rgb
     rs_front_rgb:
       shape: [3, 160, 220]       # (C,H,W) after your resize script
       type: rgb
-    # rs_wrist_rgb:
-    #   shape: [3, 160, 220]       # (C,H,W) after your resize script
-    #   type: rgb
+    rs_wrist_rgb:
+      shape: [3, 160, 220]       # (C,H,W) after your resize script
+      type: rgb
     # zed_rgb:
     #   shape: [3, 160, 220]       # (C,H,W) after your resize script
     #   type: rgb
-    pose:
-      shape: [10]                 # x y z 6d_pose gripper
-      type: low_dim
+    # pose:
+    #   shape: [10]                 # x y z 6d_pose gripper
+    #   type: low_dim
 
   action:
     shape: [10]
+    horizon: ${task.action_horizon}

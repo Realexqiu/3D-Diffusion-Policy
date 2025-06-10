@@ -1,0 +1,146 @@
+name: train_diffusion_unet_image_xarm
+_target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: front_wrist_pnoise_08_1_resnet34
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: false
+obs_as_global_cond: true
+obs_encoder_ground_norm: true
+keypoint_visible_rate: 1.0
+policy:
+  _target_: diffusion_policy.policy.diffusion_unet_image_policy.DiffusionUnetImagePolicy
+  shape_meta: ${shape_meta}
+  obs_encoder:
+    _target_: diffusion_policy.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
+    shape_meta: ${shape_meta}
+    rgb_model:
+      _target_: diffusion_policy.model.vision.model_getter.get_resnet
+      name: resnet34
+      weights: IMAGENET1K_V1
+    resize_shape: null
+    use_group_norm: false
+    share_rgb_model: false
+    imagenet_norm: true
+    crop_shape: null
+    random_crop: false
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+  diffusion_step_embed_dim: 128
+  down_dims:
+  - 512
+  - 1024
+  - 2048
+  kernel_size: 5
+  n_groups: 8
+  cond_predict_scale: true
+  num_inference_steps: 10
+  obs_as_global_cond: ${obs_as_global_cond}
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    num_train_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: true
+    set_alpha_to_one: true
+    prediction_type: epsilon
+ema:
+  _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  max_value: 0.9999
+dataloader:
+  batch_size: 64
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+val_dataloader:
+  batch_size: 64
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 0.0001
+  betas:
+  - 0.95
+  - 0.999
+  weight_decay: 1.0e-06
+training:
+  device: cuda:0
+  seed: 42
+  num_epochs: 3001
+  gradient_accumulate_every: 1
+  use_ema: true
+  freeze_encoder: false
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  checkpoint_every: 500
+  rollout_every: 999999
+  val_every: 20
+  sample_every: 5
+  resume: false
+  debug: false
+  tqdm_interval_sec: 1.0
+  max_train_steps: null
+  max_val_steps: null
+logging:
+  project: xarm_dp2d
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  resume: false
+checkpoint:
+  topk:
+    monitor_key: train_loss
+    mode: min
+    k: 10
+    format_str: epoch={epoch:04d}-train_loss={train_loss:.5f}.ckpt
+  save_last_ckpt: true
+  save_last_snapshot: false
+multi_run:
+  run_dir: training/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+task:
+  name: xarm_baseline_2d
+  task_name: xarm_baseline_2d
+  dataset:
+    _target_: diffusion_policy.dataset.xarm_2d_dataset.XArmImageDataset2D
+    zarr_path: /sailhome/swann/documents/dt_ag/dataset/2d_strawberry_baseline/4_cam_baseline_zarr_side_wrist_front_no_crop
+    shape_meta: ${shape_meta}
+    horizon: 16
+    pad_before: 1
+    pad_after: 7
+    seed: 42
+    val_ratio: 0.1
+    max_train_episodes: null
+    preload: true
+    pose_noise_std: 0.01
+    pose_noise_prob: 0.8
+  env_runner: null
+  shape_meta:
+    obs:
+      rs_front_rgb:
+        shape:
+        - 3
+        - 160
+        - 220
+        type: rgb
+      rs_wrist_rgb:
+        shape:
+        - 3
+        - 160
+        - 220
+        type: rgb
+      pose:
+        shape:
+        - 10
+        type: low_dim
+    action:
+      shape:
+      - 10

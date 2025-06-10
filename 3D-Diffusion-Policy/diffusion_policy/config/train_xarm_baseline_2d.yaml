@@ -34,17 +34,17 @@ policy:
       name: resnet18
       weights: IMAGENET1K_V1
     resize_shape: null
-    use_group_norm: false # something to try 
-    share_rgb_model: true
+    use_group_norm: true # something to try 
+    share_rgb_model: false
     imagenet_norm: true
 
     # # actual image shape is 160x220 lets crop 90% of it
-    # crop_shape: null
-    # random_crop: false
+    crop_shape: null
+    random_crop: false
 
 
-    crop_shape: [144, 198] # ch, cw 240x320 90%
-    random_crop: True
+    # crop_shape: [152, 208] # ch, cw 240x320 95%
+    # random_crop: True
     
 
   # -- diffusion UNet hyper-params --
@@ -124,7 +124,7 @@ checkpoint:
   topk:
     monitor_key: train_loss
     mode: min
-    k: 5
+    k: 10
     format_str: 'epoch={epoch:04d}-train_loss={train_loss:.5f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False

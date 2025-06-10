@@ -5,9 +5,9 @@
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=256G
+#SBATCH --mem=128G
 # only use the following on partition with GPUs
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:2
 #SBATCH --job-name="dt_ag_2d_strawberry_wrist_front_side"
 #SBATCH --output=output/dt_ag_2d_strawberry_baseline-%j.out
 ####SBATCH --output=output/dt_ag_2d_strawberry_baseline.out
@@ -47,6 +47,6 @@ unset __conda_setup
 
 conda activate dp3
 
-bash train_xarm_baseline_2d.sh train_xarm_baseline_2d xarm_baseline_2d side_front_pro_crop 42 0,1
+bash train_xarm_baseline_2d.sh train_xarm_baseline_2d_timm xarm_baseline_2d_timm front_wrist_timm 42 29510 0,1
 
 echo "Done"

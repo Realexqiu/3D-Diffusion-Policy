@@ -1,0 +1,5 @@
+- task=xarm_baseline_2d
+- training.debug=False
+- training.seed=42
+- exp_name=front_wrist_non_shared_resnet18
+- logging.mode=online

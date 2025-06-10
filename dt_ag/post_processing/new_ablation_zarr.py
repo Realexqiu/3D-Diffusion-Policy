@@ -29,12 +29,15 @@ from rich.table import Table
 INPUT_ZARR_DIR = Path("/sailhome/swann/documents/dt_ag/dataset/2d_strawberry_baseline/4_cam_baseline_zarr")
 
 # Output Zarr dataset path
-OUTPUT_ZARR_DIR = Path("/sailhome/swann/documents/dt_ag/dataset/2d_strawberry_baseline/4_cam_baseline_zarr_side_wrist_front_no_crop")
+OUTPUT_ZARR_DIR = Path("/sailhome/swann/documents/dt_ag/dataset/2d_strawberry_baseline/4_cam_baseline_zarr_side_wrist_front_no_crop_timm")
 
 # Resize settings
 ENABLE_RESIZE = True  # Set to False to keep original resolution
-TARGET_WIDTH = 220    # Target width for resizing
-TARGET_HEIGHT = 160   # Target height for resizing
+# TARGET_WIDTH = 220    # Target width for resizing
+# TARGET_HEIGHT = 160   # Target height for resizing
+
+TARGET_WIDTH = 224
+TARGET_HEIGHT = 224
 
 # Crop settings
 CROP_RS_FRONT = False  # Set to False to disable cropping

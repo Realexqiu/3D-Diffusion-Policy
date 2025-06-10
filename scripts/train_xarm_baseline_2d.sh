@@ -81,10 +81,14 @@ ALG=${1:-train_xarm_baseline_2d}
 TASK=${2:-xarm_baseline_2d}
 TAG=${3:-$(date +%m%d)}
 SEED=${4:-42}
-GPU=${5:-0}
+PORT=${5:-29502}
+GPU=${6:-0}
 
-EXP="${TASK}-${ALG}-${TAG}"
-RUN_DIR="runs/${EXP}_seed${SEED}"
+
+# EXP="${TASK}-${ALG}-${TAG}"
+EXP="${TAG}"
+# RUN_DIR="runs/${EXP}_seed${SEED}"
+RUN_DIR="runs/${EXP}"
 
 # Count number of GPUs
 IFS=',' read -ra GPU_ARRAY <<< "$GPU"
@@ -111,7 +115,7 @@ export CUDA_VISIBLE_DEVICES="${GPU}"
 # ─── Launch training ───────────────────────────────────────────────────────────
 if [ ${NUM_GPUS} -gt 1 ]; then
   echo "Launching multi-GPU training with ${NUM_GPUS} GPUs"
-  accelerate launch --multi_gpu --num_processes ${NUM_GPUS} --main_process_port 29502 train_2d.py \
+  accelerate launch --multi_gpu --num_processes ${NUM_GPUS} --main_process_port ${PORT} train_2d.py \
     --config-name "${ALG}.yaml" \
     task="${TASK}" \
     hydra.run.dir="${RUN_DIR}" \
